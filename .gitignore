@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment
+.env
+!.env.example
+
+# Database / data files
+backend/local.db
+backend/*.db
+data/
+*.parquet
+
+# Node
+node_modules/
+.npm/
+
+# Vite / build output
+frontend/dist/
+frontend/.vite/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes (local)
+pgdata/
