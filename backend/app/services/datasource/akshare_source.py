@@ -9,17 +9,25 @@ import requests
 from app.services.datasource.base import BaseDataSource
 
 
-# Patch akshare's internal session with a browser-like User-Agent.
-# Without this, East Money servers disconnect Docker containers immediately.
+# Monkey-patch requests.Session so every akshare HTTP call carries a
+# browser-like User-Agent. Without this, East Money servers close the
+# connection immediately when running inside Docker containers.
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
-try:
-    ak.stock_zh_a_hist  # trigger module load
-except Exception:
-    pass
+_orig_request = requests.Session.request
+
+
+def _patched_request(self, method, url, **kwargs):
+    headers = kwargs.pop("headers", None) or {}
+    if "User-Agent" not in headers:
+        headers["User-Agent"] = _UA
+    return _orig_request(self, method, url, headers=headers, **kwargs)
+
+
+requests.Session.request = _patched_request  # type: ignore
 
 
 def _retry(fn, retries: int = 3, delay: float = 2.0):
