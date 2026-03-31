@@ -4,18 +4,26 @@ import { useEffect } from 'react'
 
 interface Props {
   symbol?: string
-  sources: { code: string; name: string }[]
+  sources: { code: string; name: string; enabled?: boolean }[]
   onSubmit: (payload: any) => Promise<void>
 }
 
 export default function ImportHistoryForm({ symbol, sources, onSubmit }: Props) {
   const [form] = Form.useForm()
+  const availableSources = sources.filter((item) => item.enabled !== false)
 
   useEffect(() => {
     if (symbol) {
       form.setFieldValue('symbol', symbol)
     }
-  }, [symbol])
+  }, [form, symbol])
+
+  useEffect(() => {
+    const currentSource = form.getFieldValue('source')
+    if (!currentSource || !availableSources.some((item) => item.code === currentSource)) {
+      form.setFieldValue('source', availableSources[0]?.code ?? 'akshare')
+    }
+  }, [availableSources, form])
 
   return (
     <Card title="导入历史数据">
@@ -25,7 +33,7 @@ export default function ImportHistoryForm({ symbol, sources, onSubmit }: Props) 
         initialValues={{
           symbol,
           timeframe: 'daily',
-          source: sources[0]?.code ?? 'akshare',
+          source: availableSources[0]?.code ?? 'akshare',
           range: [dayjs().subtract(90, 'day'), dayjs()],
         }}
         onFinish={async (values) => {
@@ -46,7 +54,7 @@ export default function ImportHistoryForm({ symbol, sources, onSubmit }: Props) 
           <Select options={[{ value: 'daily', label: '日线' }, { value: '5m', label: '5分钟' }, { value: '15m', label: '15分钟' }]} />
         </Form.Item>
         <Form.Item name="source" label="数据源">
-          <Select options={sources.map((item) => ({ value: item.code, label: item.name }))} />
+          <Select options={availableSources.map((item) => ({ value: item.code, label: item.name }))} />
         </Form.Item>
         <Form.Item name="range" label="时间范围" rules={[{ required: true }]}>
           <DatePicker.RangePicker style={{ width: '100%' }} />

@@ -1,4 +1,5 @@
 from datetime import datetime
+import logging
 import re
 import time
 
@@ -9,21 +10,29 @@ import requests
 from app.services.datasource.base import BaseDataSource
 
 
+logger = logging.getLogger(__name__)
+
+
 # Monkey-patch requests.Session so every akshare HTTP call carries a
 # browser-like User-Agent. Without this, East Money servers close the
 # connection immediately when running inside Docker containers.
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
-)
+_DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Referer": "https://quote.eastmoney.com/",
+}
 _orig_request = requests.Session.request
 
 
 def _patched_request(self, method, url, **kwargs):
     headers = kwargs.pop("headers", None) or {}
-    if "User-Agent" not in headers:
-        headers["User-Agent"] = _UA
+    for key, value in _DEFAULT_HEADERS.items():
+        headers.setdefault(key, value)
     return _orig_request(self, method, url, headers=headers, **kwargs)
 
 
@@ -38,13 +47,27 @@ def _retry(fn, retries: int = 3, delay: float = 2.0):
             return fn()
         except Exception as e:
             last_exc = e
-            err = str(e)
-            if "RemoteDisconnected" in err or "ConnectionError" in err or "Connection aborted" in err:
+            if _is_network_error(e):
                 if attempt < retries:
                     time.sleep(delay * attempt)
                     continue
             raise
     raise last_exc  # type: ignore
+
+
+def _is_network_error(exc: Exception) -> bool:
+    err = str(exc)
+    return any(
+        marker in err
+        for marker in (
+            "RemoteDisconnected",
+            "ConnectionError",
+            "Connection aborted",
+            "Read timed out",
+            "ConnectTimeout",
+            "Failed to connect after",
+        )
+    )
 
 
 TIMEFRAME_MAP = {
@@ -81,26 +104,7 @@ class AkshareDataSource(BaseDataSource):
 
     def fetch_history(self, symbol: str, timeframe: str, start_date: str, end_date: str) -> pd.DataFrame:
         if timeframe == "daily":
-            df = _retry(lambda: ak.fund_etf_hist_em(
-                symbol=symbol,
-                period="daily",
-                start_date=start_date.replace("-", ""),
-                end_date=end_date.replace("-", ""),
-                adjust="qfq",
-            ))
-            df = df.rename(
-                columns={
-                    "日期": "ts",
-                    "开盘": "open",
-                    "收盘": "close",
-                    "最高": "high",
-                    "最低": "low",
-                    "成交量": "volume",
-                    "成交额": "amount",
-                    "振幅": "amplitude",
-                    "涨跌幅": "change_pct",
-                }
-            )
+            df = self._fetch_daily_history(symbol=symbol, start_date=start_date, end_date=end_date)
         else:
             period = TIMEFRAME_MAP.get(timeframe, "5")
             df = _retry(lambda: ak.fund_etf_hist_min_em(
@@ -166,3 +170,69 @@ class AkshareDataSource(BaseDataSource):
             }
         except Exception as e:
             raise ValueError(f"无法获取 ETF {symbol} 行情: {e}") from e
+
+    def _fetch_daily_history(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        try:
+            df = _retry(
+                lambda: ak.fund_etf_hist_em(
+                    symbol=symbol,
+                    period="daily",
+                    start_date=start_date.replace("-", ""),
+                    end_date=end_date.replace("-", ""),
+                    adjust="qfq",
+                )
+            )
+            df = self._normalize_daily_history(df)
+            df.attrs["source"] = self.code
+            return df
+        except Exception as exc:
+            if not _is_network_error(exc):
+                raise
+            logger.warning("AKShare daily history failed for %s, falling back to Sina: %s", symbol, exc)
+            df = self._fetch_daily_history_from_sina(symbol=symbol, start_date=start_date, end_date=end_date)
+            df.attrs["source"] = "sina_fallback"
+            return df
+
+    def _fetch_daily_history_from_sina(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        df = _retry(lambda: ak.fund_etf_hist_sina(symbol=self._to_sina_symbol(symbol)))
+        if df.empty:
+            return self._normalize_daily_history(df)
+        start = pd.to_datetime(start_date)
+        end = pd.to_datetime(end_date)
+        df = df.copy()
+        df["date"] = pd.to_datetime(df["date"])
+        df = df[(df["date"] >= start) & (df["date"] <= end)]
+        return self._normalize_daily_history(df)
+
+    @staticmethod
+    def _normalize_daily_history(df: pd.DataFrame) -> pd.DataFrame:
+        normalized = df.rename(
+            columns={
+                "日期": "ts",
+                "date": "ts",
+                "开盘": "open",
+                "open": "open",
+                "收盘": "close",
+                "close": "close",
+                "最高": "high",
+                "high": "high",
+                "最低": "low",
+                "low": "low",
+                "成交量": "volume",
+                "volume": "volume",
+                "成交额": "amount",
+                "振幅": "amplitude",
+                "涨跌幅": "change_pct",
+            }
+        )
+        for column in ("ts", "open", "close", "high", "low", "volume"):
+            if column not in normalized.columns:
+                normalized[column] = pd.Series(dtype="object")
+        for column in ("amount", "amplitude", "change_pct"):
+            if column not in normalized.columns:
+                normalized[column] = pd.NA
+        return normalized
+
+    @staticmethod
+    def _to_sina_symbol(symbol: str) -> str:
+        return ("sh" if str(symbol).startswith(("5", "6")) else "sz") + str(symbol)

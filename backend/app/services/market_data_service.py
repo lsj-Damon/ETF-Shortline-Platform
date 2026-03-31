@@ -6,28 +6,26 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.models.etf import EtfBarMeta, EtfSymbol
 from app.services.datasource.akshare_source import AkshareDataSource
+from app.services.datasource.base import BaseDataSource
 
 
 class MarketDataService:
     def __init__(self, db: Session):
         self.db = db
         self.settings = get_settings()
-        self.data_source = AkshareDataSource()
+        self.data_sources: dict[str, BaseDataSource] = {
+            "akshare": AkshareDataSource(),
+        }
 
     def list_data_sources(self) -> list[dict]:
         return [
             {
-                "code": self.data_source.code,
-                "name": self.data_source.name,
-                "type": self.data_source.source_type,
+                "code": item.code,
+                "name": item.name,
+                "type": item.source_type,
                 "enabled": True,
-            },
-            {
-                "code": "tushare",
-                "name": "Tushare",
-                "type": "paid",
-                "enabled": False,
-            },
+            }
+            for item in self.data_sources.values()
         ]
 
     def list_etfs(self) -> list[EtfSymbol]:
@@ -35,7 +33,7 @@ class MarketDataService:
         if symbols:
             return symbols
 
-        fetched = self.data_source.search_etfs()
+        fetched = self._resolve_data_source(self.settings.default_data_source).search_etfs()
         for item in fetched:
             existing = self.db.query(EtfSymbol).filter(EtfSymbol.symbol == item["symbol"]).first()
             if existing:
@@ -45,7 +43,8 @@ class MarketDataService:
         return self.db.query(EtfSymbol).order_by(EtfSymbol.symbol.asc()).all()
 
     def import_history(self, symbol: str, timeframe: str, start_date: str, end_date: str, source: str = "akshare") -> EtfBarMeta:
-        df = self.data_source.fetch_history(symbol=symbol, timeframe=timeframe, start_date=start_date, end_date=end_date)
+        data_source = self._resolve_data_source(source)
+        df = data_source.fetch_history(symbol=symbol, timeframe=timeframe, start_date=start_date, end_date=end_date)
         storage_path = self._save_parquet(symbol=symbol, timeframe=timeframe, df=df)
 
         meta = self.db.query(EtfBarMeta).filter(
@@ -60,7 +59,7 @@ class MarketDataService:
         meta.end_time = df["ts"].max().to_pydatetime() if not df.empty else None
         meta.bar_count = len(df)
         meta.storage_path = storage_path
-        meta.source = source
+        meta.source = str(df.attrs.get("source", data_source.code))
         self.db.commit()
         self.db.refresh(meta)
         return meta
@@ -85,7 +84,16 @@ class MarketDataService:
         return records
 
     def get_quote(self, symbol: str) -> dict:
-        return self.data_source.fetch_realtime(symbol)
+        return self._resolve_data_source(self.settings.default_data_source).fetch_realtime(symbol)
+
+    def _resolve_data_source(self, source: str | None) -> BaseDataSource:
+        source_code = (source or self.settings.default_data_source or "akshare").lower()
+        data_source = self.data_sources.get(source_code)
+        if data_source:
+            return data_source
+        if source_code == "tushare":
+            raise ValueError("Tushare 数据源当前未接入，请选择 AKShare")
+        raise ValueError(f"不支持的数据源: {source_code}")
 
     def _save_parquet(self, symbol: str, timeframe: str, df: pd.DataFrame) -> str:
         base_dir = Path(self.settings.data_dir) / "bars" / symbol
