@@ -1,7 +1,7 @@
-import { Button, Card, Col, Empty, Progress, Row, Space, Tag, Typography, message } from 'antd'
+﻿import { Button, Card, Col, Empty, Progress, Row, Segmented, Space, Tag, Typography, message } from 'antd'
 import { ReloadOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import { useEffect, useMemo, useState } from 'react'
-import { getDecisionDetail, getLiveDecisions, getRecentDecisionEvents, scanDecisions } from '../api/decision'
+import { getDecisionDetail, getLatestPlans, getLiveDecisions, getRecentDecisionEvents, scanDecisions } from '../api/decision'
 import './DecisionCenterPage.css'
 
 const scoreLabels: Record<string, string> = {
@@ -18,6 +18,12 @@ const actionClass: Record<string, string> = {
   reduce: 'decision-action-chip decision-action-chip--reduce',
   sell: 'decision-action-chip decision-action-chip--sell',
 }
+
+const timeframeOptions = [
+  { label: '5分钟', value: '5m' },
+  { label: '15分钟', value: '15m' },
+  { label: '日线', value: 'daily' },
+]
 
 function formatPct(value?: number) {
   if (typeof value !== 'number') return '--'
@@ -44,28 +50,36 @@ function formatTime(value?: string | null) {
 
 export default function DecisionCenterPage() {
   const [items, setItems] = useState<any[]>([])
+  const [plans, setPlans] = useState<any[]>([])
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null)
   const [detail, setDetail] = useState<any | null>(null)
   const [events, setEvents] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [lastScanAt, setLastScanAt] = useState<string | null>(null)
+  const [currentTimeframe, setCurrentTimeframe] = useState<string>('5m')
 
   const selectedItem = useMemo(() => detail || items.find((item) => item.symbol === selectedSymbol) || null, [detail, items, selectedSymbol])
   const buyCount = useMemo(() => items.filter((item) => item.action === 'buy').length, [items])
-  const riskCount = useMemo(() => items.filter((item) => item.action === 'sell' || item.action === 'reduce').length, [items])
+  const planCount = useMemo(() => plans.length, [plans])
+  const highConvictionCount = useMemo(() => items.filter((item) => item.confidence >= 75).length, [items])
 
-  const loadLiveBoard = async (preferredSymbol?: string | null) => {
-    const [liveRes, eventRes] = await Promise.all([
-      getLiveDecisions(24),
-      getRecentDecisionEvents(20),
+  const loadLiveBoard = async (preferredSymbol?: string | null, timeframeArg = currentTimeframe) => {
+    const [liveRes, eventRes, planRes] = await Promise.all([
+      getLiveDecisions(24, timeframeArg),
+      getRecentDecisionEvents(20, timeframeArg),
+      getLatestPlans(8, timeframeArg),
     ])
     const nextItems = liveRes.items || []
     setItems(nextItems)
     setEvents(eventRes.items || [])
-    setLastScanAt(liveRes.last_scan_at || eventRes.last_scan_at || null)
+    setPlans(planRes.items || [])
+    setLastScanAt(liveRes.last_scan_at || eventRes.last_scan_at || planRes.last_scan_at || null)
 
-    const nextSymbol = preferredSymbol || selectedSymbol || nextItems[0]?.symbol || null
+    const preferred = preferredSymbol && nextItems.some((item: any) => item.symbol === preferredSymbol) ? preferredSymbol : null
+    const current = selectedSymbol && nextItems.some((item: any) => item.symbol === selectedSymbol) ? selectedSymbol : null
+    const nextSymbol = preferred || current || nextItems[0]?.symbol || null
+
     if (nextSymbol) {
       setSelectedSymbol(nextSymbol)
     } else {
@@ -74,9 +88,9 @@ export default function DecisionCenterPage() {
     }
   }
 
-  const loadDetail = async (symbol: string) => {
+  const loadDetail = async (symbol: string, timeframeArg = currentTimeframe) => {
     try {
-      const detailRes = await getDecisionDetail(symbol)
+      const detailRes = await getDecisionDetail(symbol, timeframeArg)
       setDetail(detailRes)
     } catch {
       setDetail(null)
@@ -87,7 +101,7 @@ export default function DecisionCenterPage() {
     const init = async () => {
       setLoading(true)
       try {
-        await loadLiveBoard()
+        await loadLiveBoard(undefined, currentTimeframe)
       } catch (e: any) {
         message.error(e?.response?.data?.detail || '加载交易决策中心失败')
       } finally {
@@ -95,24 +109,25 @@ export default function DecisionCenterPage() {
       }
     }
     init()
-  }, [])
+  }, [currentTimeframe])
 
   useEffect(() => {
     if (!selectedSymbol) return
-    loadDetail(selectedSymbol)
-  }, [selectedSymbol])
+    loadDetail(selectedSymbol, currentTimeframe)
+  }, [selectedSymbol, currentTimeframe])
 
   useEffect(() => {
-    const es = new EventSource('/decisions/stream')
+    const es = new EventSource(`/decisions/stream?timeframe=${currentTimeframe}`)
 
     es.onmessage = async (event) => {
       try {
         const payload = JSON.parse(event.data)
+        if (payload.timeframe !== currentTimeframe) return
         setEvents((prev) => {
           if (prev.some((item) => item.id === payload.id)) return prev
           return [payload, ...prev].slice(0, 30)
         })
-        await loadLiveBoard(payload.symbol || selectedSymbol)
+        await loadLiveBoard(payload.symbol || selectedSymbol, currentTimeframe)
       } catch {
         // ignore malformed events
       }
@@ -121,22 +136,13 @@ export default function DecisionCenterPage() {
     return () => {
       es.close()
     }
-  }, [selectedSymbol])
+  }, [currentTimeframe, selectedSymbol])
 
   const handleRefresh = async () => {
     setRefreshing(true)
     try {
-      const scanRes = await scanDecisions()
-      setItems(scanRes.items || [])
-      setLastScanAt(scanRes.last_scan_at || null)
-      if (selectedSymbol) {
-        await loadDetail(selectedSymbol)
-      } else if (scanRes.items?.[0]?.symbol) {
-        setSelectedSymbol(scanRes.items[0].symbol)
-      }
-      if (scanRes.events?.length) {
-        setEvents((prev) => [...scanRes.events, ...prev].slice(0, 30))
-      }
+      await scanDecisions(currentTimeframe)
+      await loadLiveBoard(selectedSymbol, currentTimeframe)
       message.success('交易决策已刷新')
     } catch (e: any) {
       message.error(e?.response?.data?.detail || '刷新交易决策失败')
@@ -153,48 +159,54 @@ export default function DecisionCenterPage() {
             <div>
               <span className="decision-eyebrow">
                 <ThunderboltOutlined />
-                Trading Decision Center
+                Trading Decision Center Phase 2
               </span>
-              <h1 className="decision-title">盘中决策与次日计划，一屏完成。</h1>
+              <h1 className="decision-title">盘中双周期决策 + 次日交易剧本，同屏联动。</h1>
               <p className="decision-subtitle">
-                基于已导入 ETF 历史数据、当前行情和量能结构，实时输出买入/观察/减仓/卖出建议，并同步生成轻量的次日交易剧本。
+                现在可以在 5m、15m、日线之间切换查看不同节奏的决策结论，同时浏览增强版次日计划清单，快速锁定重点盯盘 ETF。
               </p>
             </div>
             <div className="decision-hero-stats">
               <div className="decision-mini-stat">
-                <div className="decision-mini-stat-label">跟踪 ETF</div>
+                <div className="decision-mini-stat-label">当前周期跟踪</div>
                 <div className="decision-mini-stat-value">{items.length}</div>
               </div>
               <div className="decision-mini-stat">
-                <div className="decision-mini-stat-label">可执行买点</div>
-                <div className="decision-mini-stat-value">{buyCount}</div>
+                <div className="decision-mini-stat-label">高置信机会</div>
+                <div className="decision-mini-stat-value">{highConvictionCount}</div>
               </div>
               <div className="decision-mini-stat">
-                <div className="decision-mini-stat-label">风险提示</div>
-                <div className="decision-mini-stat-value">{riskCount}</div>
+                <div className="decision-mini-stat-label">次日计划数</div>
+                <div className="decision-mini-stat-value">{planCount}</div>
               </div>
             </div>
           </div>
-          <div style={{ marginTop: 18, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-            <Typography.Text type="secondary">最后扫描：{formatTime(lastScanAt)}</Typography.Text>
-            <Button type="primary" icon={<ReloadOutlined />} loading={refreshing} onClick={handleRefresh}>
-              立即刷新决策
-            </Button>
+          <div className="decision-toolbar">
+            <div className="decision-toolbar-left">
+              <Segmented options={timeframeOptions} value={currentTimeframe} onChange={(value) => setCurrentTimeframe(String(value))} />
+              <Typography.Text type="secondary">最后扫描：{formatTime(lastScanAt)}</Typography.Text>
+            </div>
+            <div className="decision-toolbar-right">
+              <Tag color="green">可执行买点 {buyCount}</Tag>
+              <Button type="primary" icon={<ReloadOutlined />} loading={refreshing} onClick={handleRefresh}>
+                立即刷新决策
+              </Button>
+            </div>
           </div>
         </Card>
 
         <Row gutter={[16, 16]}>
           <Col xs={24} xl={7}>
-            <Card className="decision-panel" title="机会排序" loading={loading}>
+            <Card className="decision-panel" title={`机会排序 · ${currentTimeframe}`} loading={loading}>
               {items.length === 0 ? (
                 <div className="decision-empty">
-                  <Empty description="暂无可用决策，请先导入 ETF 历史数据" />
+                  <Empty description="当前周期暂无可用决策，请先导入对应 ETF 历史数据" />
                 </div>
               ) : (
                 <div className="decision-rank-list">
                   {items.map((item, index) => (
                     <div
-                      key={item.symbol}
+                      key={`${item.timeframe}-${item.symbol}`}
                       className={`decision-rank-item ${selectedSymbol === item.symbol ? 'is-active' : ''}`}
                       onClick={() => setSelectedSymbol(item.symbol)}
                     >
@@ -219,7 +231,7 @@ export default function DecisionCenterPage() {
             </Card>
           </Col>
 
-          <Col xs={24} xl={11}>
+          <Col xs={24} xl={10}>
             <Card className="decision-panel" title="盘中决策详情" loading={loading && !selectedItem}>
               {selectedItem ? (
                 <>
@@ -255,12 +267,12 @@ export default function DecisionCenterPage() {
                       <div className="decision-zone-value">{formatRange(selectedItem.sell_zone)}</div>
                     </div>
                     <div className="decision-zone-card">
-                      <div className="decision-zone-label">止损位</div>
-                      <div className="decision-zone-value">{formatPrice(selectedItem.stop_loss)}</div>
+                      <div className="decision-zone-label">突破触发价</div>
+                      <div className="decision-zone-value">{formatPrice(selectedItem.breakout_trigger)}</div>
                     </div>
                     <div className="decision-zone-card">
-                      <div className="decision-zone-label">止盈位</div>
-                      <div className="decision-zone-value">{formatPrice(selectedItem.take_profit)}</div>
+                      <div className="decision-zone-label">止损位</div>
+                      <div className="decision-zone-value">{formatPrice(selectedItem.stop_loss)}</div>
                     </div>
                   </div>
 
@@ -283,11 +295,11 @@ export default function DecisionCenterPage() {
             </Card>
           </Col>
 
-          <Col xs={24} xl={6}>
+          <Col xs={24} xl={7}>
             <Card className="decision-panel" title="动作变化流" loading={loading && events.length === 0}>
               {events.length === 0 ? (
                 <div className="decision-empty">
-                  <Empty description="当前还没有动作变化事件" />
+                  <Empty description="当前周期还没有动作变化事件" />
                 </div>
               ) : (
                 <div className="decision-event-list">
@@ -298,7 +310,7 @@ export default function DecisionCenterPage() {
                         <span className={actionClass[event.action] || actionClass.watch}>{event.action_label}</span>
                       </div>
                       <div className="decision-event-meta">
-                        {event.symbol} · 价格 {formatPrice(event.price)} · 置信度 {event.confidence}
+                        {event.symbol} · {event.timeframe} · 价格 {formatPrice(event.price)} · 置信度 {event.confidence}
                       </div>
                       <div className="decision-event-meta">{event.summary}</div>
                       <div className="decision-event-meta">更新时间 {formatTime(event.scanned_at)}</div>
@@ -310,32 +322,79 @@ export default function DecisionCenterPage() {
           </Col>
         </Row>
 
-        <Card className="decision-panel" title="次日交易计划" loading={loading && !selectedItem}>
-          {selectedItem ? (
-            <div className="decision-plan-grid">
-              <div className="decision-plan-card">
-                <div className="decision-plan-title">低吸剧本 · {selectedItem.plan?.bias || '中性'}</div>
-                <div className="decision-plan-line">{selectedItem.plan?.low_buy}</div>
-              </div>
-              <div className="decision-plan-card">
-                <div className="decision-plan-title">突破剧本</div>
-                <div className="decision-plan-line">{selectedItem.plan?.breakout_buy}</div>
-              </div>
-              <div className="decision-plan-card">
-                <div className="decision-plan-title">止盈/减仓剧本</div>
-                <div className="decision-plan-line">{selectedItem.plan?.reduce_plan}</div>
-              </div>
-              <div className="decision-plan-card">
-                <div className="decision-plan-title">防守与不参与条件</div>
-                <div className="decision-plan-line">{selectedItem.plan?.no_trade}</div>
-              </div>
-            </div>
-          ) : (
-            <div className="decision-empty">
-              <Empty description="选择 ETF 后可查看对应的次日交易计划" />
-            </div>
-          )}
-        </Card>
+        <Row gutter={[16, 16]}>
+          <Col xs={24} xl={14}>
+            <Card className="decision-panel" title="次日交易计划剧本" loading={loading && !selectedItem}>
+              {selectedItem ? (
+                <>
+                  <div className="decision-plan-banner">
+                    <div>
+                      <Typography.Title level={4} style={{ margin: 0 }}>{selectedItem.symbol} {selectedItem.name}</Typography.Title>
+                      <Typography.Text type="secondary">{selectedItem.plan?.focus}</Typography.Text>
+                    </div>
+                    <Tag color={selectedItem.plan?.bias === '偏多' ? 'green' : selectedItem.plan?.bias === '偏空' ? 'red' : 'gold'}>
+                      {selectedItem.plan?.bias || '中性'}
+                    </Tag>
+                  </div>
+
+                  <div className="decision-level-grid">
+                    <div className="decision-level-chip">支撑位 {formatPrice(selectedItem.plan?.key_levels?.support)}</div>
+                    <div className="decision-level-chip">压力位 {formatPrice(selectedItem.plan?.key_levels?.resistance)}</div>
+                    <div className="decision-level-chip">突破价 {formatPrice(selectedItem.plan?.key_levels?.breakout_trigger)}</div>
+                    <div className="decision-level-chip">止盈位 {formatPrice(selectedItem.plan?.key_levels?.take_profit)}</div>
+                  </div>
+
+                  <div className="decision-plan-grid">
+                    {(selectedItem.plan?.scenarios || []).map((scenario: any) => (
+                      <div key={scenario.key} className="decision-plan-card">
+                        <div className="decision-plan-title">{scenario.title}</div>
+                        <div className="decision-plan-line"><strong>触发：</strong>{scenario.trigger}</div>
+                        <div className="decision-plan-line"><strong>执行：</strong>{scenario.execution}</div>
+                        <div className="decision-plan-line"><strong>失效：</strong>{scenario.invalid}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="decision-summary" style={{ marginTop: 18 }}>
+                    <strong>风险提示：</strong>{selectedItem.plan?.risk_note}
+                  </div>
+                </>
+              ) : (
+                <div className="decision-empty">
+                  <Empty description="选择 ETF 后可查看增强版次日计划" />
+                </div>
+              )}
+            </Card>
+          </Col>
+
+          <Col xs={24} xl={10}>
+            <Card className="decision-panel" title={`次日计划清单 · ${currentTimeframe}`} loading={loading && plans.length === 0}>
+              {plans.length === 0 ? (
+                <div className="decision-empty">
+                  <Empty description="当前周期暂无计划清单" />
+                </div>
+              ) : (
+                <div className="decision-plan-queue">
+                  {plans.map((plan) => (
+                    <div key={`${plan.timeframe}-${plan.symbol}`} className="decision-plan-queue-item" onClick={() => setSelectedSymbol(plan.symbol)}>
+                      <div className="decision-rank-head">
+                        <div>
+                          <div className="decision-rank-name">{plan.symbol} {plan.name}</div>
+                          <div className="decision-rank-meta">{plan.timeframe} · 置信度 {plan.confidence}</div>
+                        </div>
+                        <span className={actionClass[plan.action] || actionClass.watch}>{plan.action_label}</span>
+                      </div>
+                      <div className="decision-plan-line" style={{ marginTop: 10 }}><strong>主线：</strong>{plan.focus}</div>
+                      <div className="decision-plan-line"><strong>低吸：</strong>{plan.scenarios?.[0]?.trigger || '--'}</div>
+                      <div className="decision-plan-line"><strong>突破：</strong>{plan.scenarios?.[1]?.trigger || '--'}</div>
+                      <div className="decision-plan-line"><strong>风控：</strong>{plan.risk_note}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+          </Col>
+        </Row>
       </div>
     </div>
   )

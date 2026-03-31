@@ -1,4 +1,4 @@
-.decision-center {
+﻿.decision-center {
   --dc-ink: #192331;
   --dc-muted: #6b7280;
   --dc-line: rgba(25, 35, 49, 0.08);
@@ -98,6 +98,29 @@
   font-weight: 700;
 }
 
+.decision-toolbar {
+  margin-top: 18px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.decision-toolbar-left,
+.decision-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.decision-toolbar .ant-segmented {
+  padding: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
 .decision-panel {
   border-radius: 26px;
   border: 1px solid rgba(25, 35, 49, 0.06);
@@ -139,13 +162,15 @@
 .decision-action-chip--reduce { background: rgba(214, 106, 31, 0.12); color: var(--dc-reduce); }
 .decision-action-chip--sell { background: rgba(196, 61, 61, 0.12); color: var(--dc-sell); }
 
-.decision-rank-list {
+.decision-rank-list,
+.decision-plan-queue {
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
 
-.decision-rank-item {
+.decision-rank-item,
+.decision-plan-queue-item {
   cursor: pointer;
   padding: 16px 18px;
   border-radius: 20px;
@@ -155,7 +180,8 @@
 }
 
 .decision-rank-item:hover,
-.decision-rank-item.is-active {
+.decision-rank-item.is-active,
+.decision-plan-queue-item:hover {
   transform: translateY(-1px);
   border-color: rgba(31, 111, 235, 0.22);
   box-shadow: 0 12px 24px rgba(31, 111, 235, 0.08);
@@ -231,14 +257,16 @@
   font-weight: 700;
 }
 
-.decision-tag-list {
+.decision-tag-list,
+.decision-level-grid {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 16px;
 }
 
-.decision-tag {
+.decision-tag,
+.decision-level-chip {
   padding: 6px 10px;
   border-radius: 999px;
   background: rgba(25, 35, 49, 0.06);
@@ -255,14 +283,23 @@
   line-height: 1.8;
 }
 
+.decision-plan-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .decision-plan-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
+  margin-top: 18px;
 }
 
 .decision-plan-card {
-  min-height: 142px;
+  min-height: 152px;
   padding: 18px;
   border-radius: 22px;
   border: 1px solid rgba(25, 35, 49, 0.06);
@@ -319,7 +356,8 @@
   }
 
   .decision-score-grid,
-  .decision-zone-grid {
+  .decision-zone-grid,
+  .decision-plan-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -22,18 +22,29 @@ SCAN_INTERVAL_MIN = 5
 MAX_EVENTS = 200
 MAX_SNAPSHOTS = 200
 
-_snapshots: dict[str, dict] = {}
+_SUPPORTED_TIMEFRAMES = ("5m", "15m", "daily")
+_snapshots: dict[str, dict[str, dict]] = {timeframe: {} for timeframe in _SUPPORTED_TIMEFRAMES}
 _events: deque[dict] = deque(maxlen=MAX_EVENTS)
 _subscribers: list[asyncio.Queue] = []
-_last_scan_at: datetime | None = None
+_last_scan_at: dict[str, datetime | None] = {timeframe: None for timeframe in _SUPPORTED_TIMEFRAMES}
 
-_TIMEFRAME_PRIORITY = {"5m": 0, "15m": 1, "daily": 2}
 _ACTION_LABELS = {
     "buy": "买入",
     "watch": "观察",
     "reduce": "减仓",
     "sell": "卖出",
 }
+
+
+def _normalize_timeframe(timeframe: str | None) -> str:
+    value = (timeframe or "5m").lower()
+    if value not in _SUPPORTED_TIMEFRAMES:
+        raise ValueError(f"unsupported timeframe: {timeframe}")
+    return value
+
+
+def _serialize_dt(value):
+    return value.isoformat() if hasattr(value, "isoformat") else value
 
 
 def _as_float(value, default: float = 0.0) -> float:
@@ -83,36 +94,33 @@ def _trend_bias_from_score(score: int) -> str:
     return "中性"
 
 
-def _pick_scan_targets(db: Session) -> list[dict]:
-    metas = db.query(EtfBarMeta).all()
+def _pick_scan_targets(db: Session, timeframes: list[str] | None = None) -> dict[str, list[dict]]:
+    active_timeframes = timeframes or list(_SUPPORTED_TIMEFRAMES)
+    metas = db.query(EtfBarMeta).filter(EtfBarMeta.timeframe.in_(active_timeframes)).all()
     if not metas:
-        return []
+        return {timeframe: [] for timeframe in active_timeframes}
 
-    best_by_symbol: dict[str, EtfBarMeta] = {}
+    unique_pairs: dict[tuple[str, str], EtfBarMeta] = {}
     for meta in metas:
-        current = best_by_symbol.get(meta.symbol)
-        current_rank = _TIMEFRAME_PRIORITY.get(current.timeframe, 99) if current else 99
-        next_rank = _TIMEFRAME_PRIORITY.get(meta.timeframe, 99)
-        if current is None or next_rank < current_rank:
-            best_by_symbol[meta.symbol] = meta
+        unique_pairs[(meta.symbol, meta.timeframe)] = meta
 
-    symbols = list(best_by_symbol.keys())
-    if not symbols:
-        return []
-
+    symbols = sorted({symbol for symbol, _ in unique_pairs.keys()})
     names = {
         row.symbol: row.name
         for row in db.query(EtfSymbol).filter(EtfSymbol.symbol.in_(symbols)).all()
     }
-    targets: list[dict] = []
-    for symbol, meta in best_by_symbol.items():
-        targets.append(
+
+    targets: dict[str, list[dict]] = {timeframe: [] for timeframe in active_timeframes}
+    for (symbol, timeframe), _meta in unique_pairs.items():
+        targets.setdefault(timeframe, []).append(
             {
                 "symbol": symbol,
                 "name": names.get(symbol, symbol),
-                "timeframe": meta.timeframe,
+                "timeframe": timeframe,
             }
         )
+    for timeframe in targets:
+        targets[timeframe] = sorted(targets[timeframe], key=lambda item: item["symbol"])
     return targets
 
 
@@ -271,7 +279,11 @@ def _compute_snapshot(
     if sell_zone_low > sell_zone_high:
         sell_zone_low, sell_zone_high = sell_zone_high, sell_zone_low
 
-    stop_loss_candidates = _safe_number_candidates(primary_support * 0.985, ma20 * 0.985 if ma20 else 0, boll_lower * 0.995 if boll_lower else 0)
+    stop_loss_candidates = _safe_number_candidates(
+        primary_support * 0.985,
+        ma20 * 0.985 if ma20 else 0,
+        boll_lower * 0.995 if boll_lower else 0,
+    )
     stop_loss = _round_price(min(stop_loss_candidates) if stop_loss_candidates else current_price * 0.97)
     take_profit = _round_price(max(sell_zone_high, current_price * 1.04))
     breakout_trigger = _round_price(max(_safe_number_candidates(breakout_high, recent_high, primary_resistance)))
@@ -303,10 +315,49 @@ def _compute_snapshot(
 
     plan = {
         "bias": trend_bias,
-        "low_buy": f"若回踩 {buy_zone_low}-{buy_zone_high} 且量能不明显恶化，可考虑分批关注。",
-        "breakout_buy": f"若放量站上 {breakout_trigger}，可按突破剧本顺势跟进。",
-        "reduce_plan": f"若上冲 {sell_zone_low}-{sell_zone_high}，可考虑分批止盈/减仓。",
-        "no_trade": f"若跌破 {stop_loss} 或风险等级升至高，则暂不参与。",
+        "focus": f"{timeframe} 节奏下优先观察 {'低吸承接' if action in ('buy', 'watch') else '防守与兑现'}。",
+        "risk_note": f"当前风险等级为{risk_level}，关键防守位 {stop_loss}。",
+        "key_levels": {
+            "support": _round_price(primary_support),
+            "resistance": _round_price(primary_resistance),
+            "breakout_trigger": breakout_trigger,
+            "buy_zone_low": buy_zone_low,
+            "buy_zone_high": buy_zone_high,
+            "sell_zone_low": sell_zone_low,
+            "sell_zone_high": sell_zone_high,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+        },
+        "scenarios": [
+            {
+                "key": "low_buy",
+                "title": "低吸剧本",
+                "trigger": f"回踩 {buy_zone_low}-{buy_zone_high} 支撑带且量能未明显失真。",
+                "execution": f"可考虑分批关注，首个防守位看 {stop_loss}。",
+                "invalid": f"若有效跌破 {stop_loss}，低吸剧本失效。",
+            },
+            {
+                "key": "breakout",
+                "title": "突破剧本",
+                "trigger": f"放量站上 {breakout_trigger}，确认突破结构。",
+                "execution": f"突破后优先看 {sell_zone_low}-{sell_zone_high} 的上方兑现区。",
+                "invalid": f"突破后若重新跌回 {_round_price(primary_resistance)} 下方，应降低追价意愿。",
+            },
+            {
+                "key": "reduce",
+                "title": "止盈/减仓剧本",
+                "trigger": f"上冲至 {sell_zone_low}-{sell_zone_high} 或动能明显衰减。",
+                "execution": "可按计划分批兑现，保留仓位等待更高质量信号。",
+                "invalid": f"若量能继续增强并强势突破 {sell_zone_high}，减仓节奏需重新评估。",
+            },
+            {
+                "key": "no_trade",
+                "title": "放弃剧本",
+                "trigger": f"跌破 {stop_loss} 或波动/风险快速恶化。",
+                "execution": "优先防守，不做逆势抄底。",
+                "invalid": f"若重新放量站回 {breakout_trigger} 上方，可恢复观察。",
+            },
+        ],
     }
 
     return {
@@ -341,7 +392,7 @@ def _compute_snapshot(
         "invalid_condition": invalid_condition,
         "plan": plan,
         "last_bar_ts": str(last.get("ts", "")),
-        "quote_ts": (quote or {}).get("ts"),
+        "quote_ts": _serialize_dt((quote or {}).get("ts")),
         "scanned_at": scanned_at.isoformat(),
     }
 
@@ -355,7 +406,7 @@ def _push_event(event: dict) -> None:
             pass
 
 
-def _build_event(previous: dict, current: dict, scanned_at: datetime) -> dict | None:
+def _build_event(previous: dict | None, current: dict, scanned_at: datetime) -> dict | None:
     if not previous:
         return None
 
@@ -365,14 +416,15 @@ def _build_event(previous: dict, current: dict, scanned_at: datetime) -> dict | 
         return None
 
     if action_changed:
-        headline = f"{current['name']} 由{_ACTION_LABELS.get(previous['action'], previous['action'])}切换为{current['action_label']}"
+        headline = f"{current['name']} {current['timeframe']} 由{_ACTION_LABELS.get(previous['action'], previous['action'])}切换为{current['action_label']}"
     else:
-        headline = f"{current['name']} 置信度变化至 {current['confidence']}"
+        headline = f"{current['name']} {current['timeframe']} 置信度变化至 {current['confidence']}"
 
     return {
-        "id": f"{current['symbol']}-{scanned_at.timestamp()}",
+        "id": f"{current['symbol']}-{current['timeframe']}-{scanned_at.timestamp()}",
         "symbol": current["symbol"],
         "name": current["name"],
+        "timeframe": current["timeframe"],
         "action": current["action"],
         "action_label": current["action_label"],
         "headline": headline,
@@ -383,87 +435,96 @@ def _build_event(previous: dict, current: dict, scanned_at: datetime) -> dict | 
     }
 
 
-def scan_once() -> list[dict]:
-    global _last_scan_at
+def scan_once(timeframes: list[str] | None = None) -> list[dict]:
     fired_events: list[dict] = []
     scanned_at = datetime.now()
+    active_timeframes = [_normalize_timeframe(item) for item in timeframes] if timeframes else list(_SUPPORTED_TIMEFRAMES)
     db = SessionLocal()
     try:
         market = MarketDataService(db)
-        targets = _pick_scan_targets(db)
-        next_snapshots: dict[str, dict] = {}
+        grouped_targets = _pick_scan_targets(db, active_timeframes)
 
-        for target in targets[:MAX_SNAPSHOTS]:
-            symbol = target["symbol"]
-            timeframe = target["timeframe"]
-            try:
-                bars = market.get_bars(symbol=symbol, timeframe=timeframe, limit=200)
-                if len(bars) < 30:
-                    continue
+        for timeframe in active_timeframes:
+            next_snapshots: dict[str, dict] = {}
+            for target in grouped_targets.get(timeframe, [])[:MAX_SNAPSHOTS]:
+                symbol = target["symbol"]
                 try:
-                    quote = market.get_quote(symbol)
-                except Exception:
-                    quote = None
+                    bars = market.get_bars(symbol=symbol, timeframe=timeframe, limit=200)
+                    if len(bars) < 30:
+                        continue
+                    try:
+                        quote = market.get_quote(symbol)
+                    except Exception:
+                        quote = None
 
-                snapshot = _compute_snapshot(
-                    symbol=symbol,
-                    name=target["name"],
-                    timeframe=timeframe,
-                    bars=bars,
-                    quote=quote,
-                    scanned_at=scanned_at,
-                )
-                if not snapshot:
-                    continue
+                    snapshot = _compute_snapshot(
+                        symbol=symbol,
+                        name=target["name"],
+                        timeframe=timeframe,
+                        bars=bars,
+                        quote=quote,
+                        scanned_at=scanned_at,
+                    )
+                    if not snapshot:
+                        continue
 
-                previous = _snapshots.get(symbol)
-                next_snapshots[symbol] = snapshot
-                event = _build_event(previous, snapshot, scanned_at)
-                if event:
-                    _push_event(event)
-                    fired_events.append(event)
-            except Exception as exc:
-                logger.warning("decision scan failed for %s: %s", symbol, exc)
+                    previous = _snapshots.get(timeframe, {}).get(symbol)
+                    next_snapshots[symbol] = snapshot
+                    event = _build_event(previous, snapshot, scanned_at)
+                    if event:
+                        _push_event(event)
+                        fired_events.append(event)
+                except Exception as exc:
+                    logger.warning("decision scan failed for %s %s: %s", symbol, timeframe, exc)
 
-        _snapshots.clear()
-        _snapshots.update(next_snapshots)
-        _last_scan_at = scanned_at
+            _snapshots[timeframe] = next_snapshots
+            _last_scan_at[timeframe] = scanned_at
     finally:
         db.close()
     return fired_events
 
 
-def ensure_fresh(max_age_seconds: int = SCAN_INTERVAL_MIN * 60) -> None:
-    if not _snapshots or _last_scan_at is None:
-        scan_once()
-        return
-    if datetime.now() - _last_scan_at > timedelta(seconds=max_age_seconds):
-        scan_once()
+def ensure_fresh(timeframe: str | None = None, max_age_seconds: int = SCAN_INTERVAL_MIN * 60) -> None:
+    active_timeframes = [_normalize_timeframe(timeframe)] if timeframe else list(_SUPPORTED_TIMEFRAMES)
+    stale = False
+    for item in active_timeframes:
+        if not _snapshots.get(item) or _last_scan_at.get(item) is None:
+            stale = True
+            break
+        if datetime.now() - _last_scan_at[item] > timedelta(seconds=max_age_seconds):
+            stale = True
+            break
+    if stale:
+        scan_once(active_timeframes)
 
 
-def get_live_decisions(limit: int = 20) -> dict:
-    ensure_fresh()
+def get_live_decisions(limit: int = 20, timeframe: str | None = None) -> dict:
+    selected_timeframe = _normalize_timeframe(timeframe)
+    ensure_fresh(selected_timeframe)
     items = sorted(
-        _snapshots.values(),
+        _snapshots.get(selected_timeframe, {}).values(),
         key=lambda item: (item.get("score", 0), item.get("confidence", 0)),
         reverse=True,
     )[:limit]
     return {
         "items": items,
-        "last_scan_at": _last_scan_at.isoformat() if _last_scan_at else None,
+        "timeframe": selected_timeframe,
+        "last_scan_at": _serialize_dt(_last_scan_at.get(selected_timeframe)),
         "count": len(items),
     }
 
 
-def get_live_decision(symbol: str) -> dict | None:
-    ensure_fresh()
-    return _snapshots.get(symbol)
+def get_live_decision(symbol: str, timeframe: str | None = None) -> dict | None:
+    selected_timeframe = _normalize_timeframe(timeframe)
+    ensure_fresh(selected_timeframe)
+    return _snapshots.get(selected_timeframe, {}).get(symbol)
 
 
-def get_latest_plans(limit: int = 20) -> dict:
-    ensure_fresh()
+def get_latest_plans(limit: int = 20, timeframe: str | None = None) -> dict:
+    selected_timeframe = _normalize_timeframe(timeframe)
+    ensure_fresh(selected_timeframe)
     items = sorted(
-        _snapshots.values(),
+        _snapshots.get(selected_timeframe, {}).values(),
         key=lambda item: item.get("score", 0),
         reverse=True,
     )[:limit]
@@ -472,21 +533,26 @@ def get_latest_plans(limit: int = 20) -> dict:
             {
                 "symbol": item["symbol"],
                 "name": item["name"],
+                "timeframe": item["timeframe"],
+                "action": item["action"],
+                "action_label": item["action_label"],
+                "confidence": item["confidence"],
                 "bias": item["plan"]["bias"],
-                "breakout_buy": item["plan"]["breakout_buy"],
-                "low_buy": item["plan"]["low_buy"],
-                "reduce_plan": item["plan"]["reduce_plan"],
-                "no_trade": item["plan"]["no_trade"],
+                "focus": item["plan"]["focus"],
+                "risk_note": item["plan"]["risk_note"],
+                "scenarios": item["plan"]["scenarios"],
+                "key_levels": item["plan"]["key_levels"],
                 "scanned_at": item["scanned_at"],
             }
             for item in items
         ],
-        "last_scan_at": _last_scan_at.isoformat() if _last_scan_at else None,
+        "timeframe": selected_timeframe,
+        "last_scan_at": _serialize_dt(_last_scan_at.get(selected_timeframe)),
     }
 
 
-def get_plan(symbol: str) -> dict | None:
-    snapshot = get_live_decision(symbol)
+def get_plan(symbol: str, timeframe: str | None = None) -> dict | None:
+    snapshot = get_live_decision(symbol, timeframe)
     if not snapshot:
         return None
     return {
@@ -503,25 +569,35 @@ def get_plan(symbol: str) -> dict | None:
     }
 
 
-def get_recent_events(limit: int = 30) -> list[dict]:
-    return list(_events)[:limit]
+def get_recent_events(limit: int = 30, timeframe: str | None = None) -> list[dict]:
+    selected_timeframe = _normalize_timeframe(timeframe) if timeframe else None
+    items = list(_events)
+    if selected_timeframe:
+        items = [item for item in items if item.get("timeframe") == selected_timeframe]
+    return items[:limit]
 
 
-def get_state_meta() -> dict:
+def get_state_meta(timeframe: str | None = None) -> dict:
+    selected_timeframe = _normalize_timeframe(timeframe)
     return {
-        "last_scan_at": _last_scan_at.isoformat() if _last_scan_at else None,
-        "tracked": len(_snapshots),
+        "timeframe": selected_timeframe,
+        "last_scan_at": _serialize_dt(_last_scan_at.get(selected_timeframe)),
+        "tracked": len(_snapshots.get(selected_timeframe, {})),
+        "available_timeframes": list(_SUPPORTED_TIMEFRAMES),
     }
 
 
-async def subscribe() -> AsyncIterator[dict]:
+async def subscribe(timeframe: str | None = None) -> AsyncIterator[dict]:
+    selected_timeframe = _normalize_timeframe(timeframe) if timeframe else None
     queue: asyncio.Queue = asyncio.Queue(maxsize=100)
     _subscribers.append(queue)
     try:
-        for event in get_recent_events(10):
+        for event in get_recent_events(10, selected_timeframe):
             yield event
         while True:
             event = await asyncio.wait_for(queue.get(), timeout=30)
+            if selected_timeframe and event.get("timeframe") != selected_timeframe:
+                continue
             yield event
     except (asyncio.TimeoutError, asyncio.CancelledError):
         pass

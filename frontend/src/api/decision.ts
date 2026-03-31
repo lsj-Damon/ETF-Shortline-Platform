@@ -1,26 +1,26 @@
-import http from './http'
+﻿import http from './http'
 
-export const getLiveDecisions = async (limit = 20) => {
-  const res = await http.get('/api/v1/decisions/live', { params: { limit } })
+export const getLiveDecisions = async (limit = 20, timeframe = '5m') => {
+  const res = await http.get('/api/v1/decisions/live', { params: { limit, timeframe } })
   return res.data
 }
 
-export const getDecisionDetail = async (symbol: string) => {
-  const res = await http.get(`/api/v1/decisions/live/${symbol}`)
+export const getDecisionDetail = async (symbol: string, timeframe = '5m') => {
+  const res = await http.get(`/api/v1/decisions/live/${symbol}`, { params: { timeframe } })
   return res.data
 }
 
-export const getRecentDecisionEvents = async (limit = 30) => {
-  const res = await http.get('/api/v1/decisions/recent-events', { params: { limit } })
+export const getRecentDecisionEvents = async (limit = 30, timeframe = '5m') => {
+  const res = await http.get('/api/v1/decisions/recent-events', { params: { limit, timeframe } })
   return res.data
 }
 
-export const getLatestPlans = async (limit = 20) => {
-  const res = await http.get('/api/v1/plans/latest', { params: { limit } })
+export const getLatestPlans = async (limit = 20, timeframe = '5m') => {
+  const res = await http.get('/api/v1/plans/latest', { params: { limit, timeframe } })
   return res.data
 }
 
-export const scanDecisions = async () => {
-  const res = await http.post('/api/v1/decisions/scan')
+export const scanDecisions = async (timeframe?: string) => {
+  const res = await http.post('/api/v1/decisions/scan', null, { params: timeframe ? { timeframe } : {} })
   return res.data
 }
