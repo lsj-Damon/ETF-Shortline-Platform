@@ -1,5 +1,6 @@
 import { Button, Card, DatePicker, Form, Select } from 'antd'
 import dayjs from 'dayjs'
+import { useEffect } from 'react'
 
 interface Props {
   symbol?: string
@@ -9,6 +10,12 @@ interface Props {
 
 export default function ImportHistoryForm({ symbol, sources, onSubmit }: Props) {
   const [form] = Form.useForm()
+
+  useEffect(() => {
+    if (symbol) {
+      form.setFieldValue('symbol', symbol)
+    }
+  }, [symbol])
 
   return (
     <Card title="导入历史数据">

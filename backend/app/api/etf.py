@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
@@ -11,7 +11,10 @@ router = APIRouter(prefix="/api/v1/etfs", tags=["etfs"])
 @router.get("")
 def list_etfs(db: Session = Depends(get_db)):
     service = MarketDataService(db)
-    rows = service.list_etfs()
+    try:
+        rows = service.list_etfs()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取 ETF 列表失败: {e}")
     return [
         {
             "symbol": row.symbol,
@@ -27,13 +30,16 @@ def list_etfs(db: Session = Depends(get_db)):
 @router.post("/import-history")
 def import_history(payload: ImportHistoryRequest, db: Session = Depends(get_db)):
     service = MarketDataService(db)
-    meta = service.import_history(
-        symbol=payload.symbol,
-        timeframe=payload.timeframe,
-        start_date=payload.start_date,
-        end_date=payload.end_date,
-        source=payload.source,
-    )
+    try:
+        meta = service.import_history(
+            symbol=payload.symbol,
+            timeframe=payload.timeframe,
+            start_date=payload.start_date,
+            end_date=payload.end_date,
+            source=payload.source,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"导入失败: {e}")
     return {
         "symbol": meta.symbol,
         "timeframe": meta.timeframe,
@@ -63,4 +69,7 @@ def get_bars(
 @router.get("/{symbol}/quote")
 def get_quote(symbol: str, db: Session = Depends(get_db)):
     service = MarketDataService(db)
-    return service.get_quote(symbol)
+    try:
+        return service.get_quote(symbol)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"获取行情失败: {e}")

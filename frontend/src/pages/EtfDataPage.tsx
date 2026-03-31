@@ -60,7 +60,8 @@ export default function EtfDataPage() {
       setTimeframe(payload.timeframe)
       message.success('历史数据导入成功')
     } catch (e: any) {
-      message.error(e?.message || '导入失败')
+      const detail = e?.response?.data?.detail || e?.message || '导入失败'
+      message.error(detail)
     } finally {
       setLoading(false)
     }
