@@ -1,6 +1,7 @@
 import { Button, Card, Col, DatePicker, Form, InputNumber, message, Row, Select, Spin } from 'antd'
 import dayjs from 'dayjs'
 import { useEffect, useState } from 'react'
+import { getEtfList } from '../api/etf'
 import { getStrategyList } from '../api/strategy'
 import { getBacktestChart, getBacktestResult, getBacktestTrades, runBacktest, waitForBacktest } from '../api/backtest'
 import MetricCards from '../components/MetricCards'
@@ -9,22 +10,35 @@ import KlineChart from '../components/KlineChart'
 import { useAnalysisStore } from '../store/analysisStore'
 
 export default function BacktestPage() {
+  const [form] = Form.useForm()
   const [strategies, setStrategies] = useState<any[]>([])
+  const [etfs, setEtfs] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
   const { result, trades, chart, selectedTrade, setAnalysis, setSelectedTrade } = useAnalysisStore()
 
   useEffect(() => {
-    getStrategyList().then(setStrategies)
+    Promise.all([getStrategyList(), getEtfList()]).then(([strategyList, etfList]) => {
+      setStrategies(strategyList)
+      setEtfs(etfList)
+    })
   }, [])
+
+  const handleStrategyChange = (strategyId: number) => {
+    const target = strategies.find((item) => item.id === strategyId)
+    if (target) {
+      form.setFieldValue('symbol', target.symbol)
+    }
+  }
 
   const onFinish = async (values: any) => {
     const target = strategies.find((item) => item.id === values.strategy_id)
     if (!target) { message.error('请先选择策略'); return }
+    if (!values.symbol) { message.error('请选择回测 ETF'); return }
     setLoading(true)
     try {
       const resp = await runBacktest({
         strategy_id: values.strategy_id,
-        symbol: target.symbol,
+        symbol: values.symbol,
         start_date: values.date_range[0].format('YYYY-MM-DD'),
         end_date: values.date_range[1].format('YYYY-MM-DD'),
         capital: values.capital,
@@ -41,7 +55,7 @@ export default function BacktestPage() {
       setSelectedTrade(null)
       message.success('回测完成')
     } catch (e: any) {
-      message.error(e?.response?.data?.detail || '回测失败')
+      message.error(e?.response?.data?.detail || e?.message || '回测失败')
     } finally {
       setLoading(false)
     }
@@ -51,6 +65,7 @@ export default function BacktestPage() {
     <div>
       <Card title="运行回测" style={{ marginBottom: 16 }}>
         <Form
+          form={form}
           layout="inline"
           onFinish={onFinish}
           initialValues={{
@@ -63,7 +78,16 @@ export default function BacktestPage() {
           <Form.Item name="strategy_id" label="策略" rules={[{ required: true, message: '请选择策略' }]}>
             <Select
               style={{ width: 260 }}
+              onChange={handleStrategyChange}
               options={strategies.map((item) => ({ value: item.id, label: `${item.name} (${item.symbol})` }))}
+            />
+          </Form.Item>
+          <Form.Item name="symbol" label="回测ETF" rules={[{ required: true, message: '请选择ETF' }]}>
+            <Select
+              showSearch
+              style={{ width: 260 }}
+              placeholder="默认跟随策略，可手动切换"
+              options={etfs.map((item) => ({ value: item.symbol, label: `${item.symbol} ${item.name}` }))}
             />
           </Form.Item>
           <Form.Item name="date_range" label="回测区间" rules={[{ required: true, message: '请选择日期范围' }]}>

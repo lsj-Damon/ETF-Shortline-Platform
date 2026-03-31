@@ -7,6 +7,7 @@ import pandas as pd
 from sqlalchemy.orm import Session
 
 from app.models.backtest import BacktestJob, BacktestResult, TradeDetail
+from app.models.etf import EtfBarMeta
 from app.models.strategy import Strategy
 from app.services.indicator_service import IndicatorService
 from app.services.market_data_service import MarketDataService
@@ -54,9 +55,13 @@ class BacktestService:
         if not strategy:
             raise ValueError('strategy not found')
 
+        self.validate_run_request(
+            strategy=strategy,
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+        )
         bars = self.market.get_bars(symbol=symbol, timeframe=strategy.timeframe, start=start_date, end=end_date, limit=10000)
-        if not bars:
-            raise ValueError('no bars found, please import history first')
 
         df = pd.DataFrame(bars)
         for col in ['open', 'high', 'low', 'close', 'volume']:
@@ -118,6 +123,31 @@ class BacktestService:
         job.finished_at = datetime.utcnow()
         self.db.commit()
         return job.id
+
+    def validate_run_request(self, strategy: Strategy, symbol: str, start_date: str, end_date: str) -> None:
+        if not symbol:
+            raise ValueError('请选择要回测的 ETF')
+
+        meta = self.db.query(EtfBarMeta).filter(
+            EtfBarMeta.symbol == symbol,
+            EtfBarMeta.timeframe == strategy.timeframe,
+        ).first()
+        if not meta:
+            raise ValueError(
+                f'ETF {symbol} 缺少 {strategy.timeframe} 历史数据，请先在 ETF 数据中心导入该周期数据'
+            )
+
+        bars = self.market.get_bars(
+            symbol=symbol,
+            timeframe=strategy.timeframe,
+            start=start_date,
+            end=end_date,
+            limit=1,
+        )
+        if not bars:
+            raise ValueError(
+                f'ETF {symbol} 的 {strategy.timeframe} 数据不包含区间 {start_date} ~ {end_date}，请调整回测区间或重新导入历史数据'
+            )
 
     def get_result(self, job_id: int):
         result = self.db.query(BacktestResult).filter(BacktestResult.job_id == job_id).first()

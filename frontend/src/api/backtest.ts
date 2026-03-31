@@ -10,9 +10,9 @@ export const waitForBacktest = async (jobId: number, intervalMs = 800, timeoutMs
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const res = await http.get(`/api/v1/backtests/${jobId}/status`)
-    const { status } = res.data
+    const { status, error } = res.data
     if (status === 'finished') return
-    if (status === 'failed') throw new Error('回测执行失败')
+    if (status === 'failed') throw new Error(error || '回测执行失败')
     await new Promise((r) => setTimeout(r, intervalMs))
   }
   throw new Error('回测超时，请检查数据是否已导入')

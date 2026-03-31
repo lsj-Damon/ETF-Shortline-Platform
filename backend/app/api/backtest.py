@@ -12,6 +12,7 @@ from app.services.optimization_service import OptimizationService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["backtests"])
+_job_errors: dict[int, str] = {}
 
 
 def _run_in_background(job_id: int, kwargs: dict) -> None:
@@ -19,8 +20,10 @@ def _run_in_background(job_id: int, kwargs: dict) -> None:
     db = SessionLocal()
     try:
         BacktestService(db).run(existing_job_id=job_id, **kwargs)
-    except Exception:
+        _job_errors.pop(job_id, None)
+    except Exception as exc:
         logger.exception('Background backtest failed job_id=%s', job_id)
+        _job_errors[job_id] = str(exc)
         job = db.query(BacktestJob).filter(BacktestJob.id == job_id).first()
         if job:
             job.status = 'failed'
@@ -38,6 +41,16 @@ def run_backtest(payload: BacktestRunRequest, db: Session = Depends(get_db)):
     strategy = db.query(Strategy).filter(Strategy.id == payload.strategy_id).first()
     if not strategy:
         raise HTTPException(status_code=400, detail='strategy not found')
+
+    try:
+        BacktestService(db).validate_run_request(
+            strategy=strategy,
+            symbol=payload.symbol,
+            start_date=payload.start_date,
+            end_date=payload.end_date,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     # Pre-create the job row so the client has a stable job_id before simulation starts
     job = BacktestJob(
@@ -75,7 +88,10 @@ def get_backtest_status(job_id: int, db: Session = Depends(get_db)):
     job = db.query(BacktestJob).filter(BacktestJob.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail='job not found')
-    return {'job_id': job_id, 'status': job.status}
+    payload = {'job_id': job_id, 'status': job.status}
+    if job.status == 'failed':
+        payload['error'] = _job_errors.get(job_id, '回测执行失败，请检查后端日志')
+    return payload
 
 
 @router.get('/backtests/{job_id}')
