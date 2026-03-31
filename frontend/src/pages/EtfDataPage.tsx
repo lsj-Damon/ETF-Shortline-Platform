@@ -35,11 +35,16 @@ export default function EtfDataPage() {
     if (!currentSymbol) return
     const loadDetail = async () => {
       try {
-        const [barsData, quoteData] = await Promise.all([getEtfBars(currentSymbol, timeframe), getEtfQuote(currentSymbol)])
+        const barsData = await getEtfBars(currentSymbol, timeframe)
         setBars(barsData.items || [])
+      } catch {
+        message.error('加载 K 线数据失败')
+      }
+      try {
+        const quoteData = await getEtfQuote(currentSymbol)
         setQuote(quoteData)
       } catch {
-        message.error('加载 ETF 数据失败')
+        // 行情接口不稳定，静默失败，不影响 K 线展示
       }
     }
     loadDetail()
