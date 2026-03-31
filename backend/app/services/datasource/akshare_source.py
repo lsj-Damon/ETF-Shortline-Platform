@@ -1,10 +1,42 @@
 from datetime import datetime
 import re
+import time
 
 import akshare as ak
 import pandas as pd
+import requests
 
 from app.services.datasource.base import BaseDataSource
+
+
+# Patch akshare's internal session with a browser-like User-Agent.
+# Without this, East Money servers disconnect Docker containers immediately.
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+try:
+    ak.stock_zh_a_hist  # trigger module load
+except Exception:
+    pass
+
+
+def _retry(fn, retries: int = 3, delay: float = 2.0):
+    """Call fn(), retry on RemoteDisconnected / ConnectionError."""
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            return fn()
+        except Exception as e:
+            last_exc = e
+            err = str(e)
+            if "RemoteDisconnected" in err or "ConnectionError" in err or "Connection aborted" in err:
+                if attempt < retries:
+                    time.sleep(delay * attempt)
+                    continue
+            raise
+    raise last_exc  # type: ignore
 
 
 TIMEFRAME_MAP = {
@@ -23,7 +55,7 @@ class AkshareDataSource(BaseDataSource):
     source_type = "free"
 
     def search_etfs(self) -> list[dict]:
-        df = ak.fund_etf_category_sina(symbol="ETF基金")
+        df = _retry(lambda: ak.fund_etf_category_sina(symbol="ETF基金"))
         rows = []
         for _, row in df.iterrows():
             raw_symbol = str(row.get("代码", "")).strip()
@@ -41,7 +73,13 @@ class AkshareDataSource(BaseDataSource):
 
     def fetch_history(self, symbol: str, timeframe: str, start_date: str, end_date: str) -> pd.DataFrame:
         if timeframe == "daily":
-            df = ak.fund_etf_hist_em(symbol=symbol, period="daily", start_date=start_date.replace("-", ""), end_date=end_date.replace("-", ""), adjust="qfq")
+            df = _retry(lambda: ak.fund_etf_hist_em(
+                symbol=symbol,
+                period="daily",
+                start_date=start_date.replace("-", ""),
+                end_date=end_date.replace("-", ""),
+                adjust="qfq",
+            ))
             df = df.rename(
                 columns={
                     "日期": "ts",
@@ -57,7 +95,13 @@ class AkshareDataSource(BaseDataSource):
             )
         else:
             period = TIMEFRAME_MAP.get(timeframe, "5")
-            df = ak.fund_etf_hist_min_em(symbol=symbol, period=period, adjust="qfq", start_date=start_date, end_date=end_date)
+            df = _retry(lambda: ak.fund_etf_hist_min_em(
+                symbol=symbol,
+                period=period,
+                adjust="qfq",
+                start_date=start_date,
+                end_date=end_date,
+            ))
             df = df.rename(
                 columns={
                     "时间": "ts",
@@ -78,7 +122,7 @@ class AkshareDataSource(BaseDataSource):
 
     def fetch_realtime(self, symbol: str) -> dict:
         try:
-            df = ak.fund_etf_spot_em()
+            df = _retry(lambda: ak.fund_etf_spot_em())
             normalized = df["代码"].astype(str).str.replace(r"^[a-zA-Z]+", "", regex=True)
             target = df[normalized == str(symbol)]
             if not target.empty:
@@ -93,8 +137,7 @@ class AkshareDataSource(BaseDataSource):
         except Exception:
             pass
 
-        # Fallback: try fetching last 5 days of daily bars from AKShare directly
-        # (does not depend on locally cached Parquet)
+        # Fallback: fetch from daily history
         try:
             end = datetime.now().strftime("%Y-%m-%d")
             start = "2024-01-01"
