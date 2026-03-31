@@ -10,3 +10,4 @@ pyarrow==19.0.1
 python-dotenv==1.0.1
 akshare==1.18.47
 python-multipart==0.0.12
+apscheduler==3.10.4

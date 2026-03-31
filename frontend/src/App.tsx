@@ -1,5 +1,6 @@
 import { Layout, Menu } from 'antd'
 import { useState } from 'react'
+import AlertBell from './components/AlertBell'
 import EtfDataPage from './pages/EtfDataPage'
 import StrategyPage from './pages/StrategyPage'
 import BacktestPage from './pages/BacktestPage'
@@ -31,8 +32,9 @@ export default function App() {
         />
       </Sider>
       <Layout>
-        <Header style={{ background: '#fff', padding: '0 16px', fontWeight: 600 }}>
-          A股 ETF 超短线分析系统 MVP
+        <Header style={{ background: '#fff', padding: '0 16px', fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span>A股 ETF 超短线分析系统 MVP</span>
+          <AlertBell />
         </Header>
         <Content style={{ padding: 16 }}>
           {activeKey === 'etf' && <EtfDataPage />}
