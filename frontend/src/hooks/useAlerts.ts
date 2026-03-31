@@ -11,15 +11,13 @@ export interface Alert {
   scanned_at: string
 }
 
-const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
-
 export function useAlerts() {
   const [alerts, setAlerts] = useState<Alert[]>([])
   const [unread, setUnread] = useState(0)
   const esRef = useRef<EventSource | null>(null)
 
   useEffect(() => {
-    const es = new EventSource(`${API_BASE}/alerts/stream`)
+    const es = new EventSource('/alerts/stream')
     esRef.current = es
 
     es.onmessage = (event) => {
