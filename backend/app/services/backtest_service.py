@@ -1,7 +1,7 @@
 import json
 import math
 import re
-from datetime import datetime
+from datetime import date, datetime
 
 import pandas as pd
 from sqlalchemy.orm import Session
@@ -23,6 +23,32 @@ def _collect_ma_periods(rules: list[dict]) -> list[int]:
             if m:
                 periods.add(int(m.group(1)))
     return list(periods)
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if value is None or value is pd.NA:
+        return None
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if hasattr(value, "item") and callable(getattr(value, "item")):
+        try:
+            return _json_safe(value.item())
+        except Exception:
+            pass
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    return value
 
 
 class BacktestService:
@@ -114,7 +140,7 @@ class BacktestService:
             profit_factor=summary['profit_factor'],
             trade_count=summary['trade_count'],
             sharpe=summary['sharpe'],
-            result_json=json.dumps({'summary': summary, 'chart': chart}, ensure_ascii=False),
+            result_json=json.dumps(_json_safe({'summary': summary, 'chart': chart}), ensure_ascii=False),
         )
         self.db.add(result)
         for trade in trades:

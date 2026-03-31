@@ -8,6 +8,10 @@ from app.services.market_data_service import MarketDataService
 router = APIRouter(prefix="/api/v1/etfs", tags=["etfs"])
 
 
+def _serialize_datetime(value):
+    return value.isoformat() if hasattr(value, "isoformat") else value
+
+
 @router.get("")
 def list_etfs(db: Session = Depends(get_db)):
     service = MarketDataService(db)
@@ -43,12 +47,12 @@ def import_history(payload: ImportHistoryRequest, db: Session = Depends(get_db))
     return {
         "symbol": meta.symbol,
         "timeframe": meta.timeframe,
-        "start_time": meta.start_time,
-        "end_time": meta.end_time,
+        "start_time": _serialize_datetime(meta.start_time),
+        "end_time": _serialize_datetime(meta.end_time),
         "bar_count": meta.bar_count,
         "storage_path": meta.storage_path,
         "source": meta.source,
-        "updated_at": meta.updated_at,
+        "updated_at": _serialize_datetime(meta.updated_at),
     }
 
 
@@ -70,6 +74,8 @@ def get_bars(
 def get_quote(symbol: str, db: Session = Depends(get_db)):
     service = MarketDataService(db)
     try:
-        return service.get_quote(symbol)
+        payload = service.get_quote(symbol)
+        payload["ts"] = _serialize_datetime(payload.get("ts"))
+        return payload
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"获取行情失败: {e}")
