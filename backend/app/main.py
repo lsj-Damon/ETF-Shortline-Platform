@@ -12,8 +12,9 @@ from app.api.datasource import router as datasource_router
 from app.api.etf import router as etf_router
 from app.api.strategy import router as strategy_router
 from app.core.config import get_settings
-from app.core.db import Base, engine
+from app.core.db import Base, engine, SessionLocal
 from app.services import signal_monitor_service as monitor
+from app.services.seed_service import seed_default_strategies
 import app.models.etf  # noqa
 import app.models.strategy  # noqa
 import app.models.backtest  # noqa
@@ -36,6 +37,8 @@ def _scheduled_scan():
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    with SessionLocal() as db:
+        seed_default_strategies(db)
     _scheduler.add_job(
         _scheduled_scan,
         trigger="interval",
