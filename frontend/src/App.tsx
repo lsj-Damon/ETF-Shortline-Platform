@@ -4,6 +4,7 @@ import AlertBell from './components/AlertBell'
 import EtfDataPage from './pages/EtfDataPage'
 import StrategyPage from './pages/StrategyPage'
 import BacktestPage from './pages/BacktestPage'
+import DecisionCenterPage from './pages/DecisionCenterPage'
 import OptimizationPage from './pages/OptimizationPage'
 import SignalAnalysisPage from './pages/SignalAnalysisPage'
 
@@ -24,6 +25,7 @@ export default function App() {
           onClick={(e) => setActiveKey(e.key)}
           items={[
             { key: 'etf', label: 'ETF 数据中心' },
+            { key: 'decision', label: '交易决策中心' },
             { key: 'strategy', label: '策略配置' },
             { key: 'backtest', label: '回测中心' },
             { key: 'signal', label: '买卖点分析' },
@@ -38,6 +40,7 @@ export default function App() {
         </Header>
         <Content style={{ padding: 16 }}>
           {activeKey === 'etf' && <EtfDataPage />}
+          {activeKey === 'decision' && <DecisionCenterPage />}
           {activeKey === 'strategy' && <StrategyPage />}
           {activeKey === 'backtest' && <BacktestPage />}
           {activeKey === 'signal' && <SignalAnalysisPage />}

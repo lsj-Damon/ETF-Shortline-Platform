@@ -8,11 +8,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.alerts import router as alerts_router
 from app.api.backtest import router as backtest_router
+from app.api.decision import router as decision_router
 from app.api.datasource import router as datasource_router
 from app.api.etf import router as etf_router
 from app.api.strategy import router as strategy_router
 from app.core.config import get_settings
 from app.core.db import Base, engine, SessionLocal
+from app.services import decision_service
 from app.services import signal_monitor_service as monitor
 from app.services.seed_service import seed_default_strategies
 import app.models.etf  # noqa
@@ -35,6 +37,14 @@ def _scheduled_scan():
         logger.debug("[scheduler] outside trading hours — skipping scan")
 
 
+def _scheduled_decision_scan():
+    try:
+        logger.info("[scheduler] running decision scan")
+        decision_service.scan_once()
+    except Exception:
+        logger.exception("[scheduler] decision scan failed")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     with SessionLocal() as db:
@@ -44,6 +54,13 @@ async def lifespan(_app: FastAPI):
         trigger="interval",
         minutes=monitor.SCAN_INTERVAL_MIN,
         id="signal_scan",
+        replace_existing=True,
+    )
+    _scheduler.add_job(
+        _scheduled_decision_scan,
+        trigger="interval",
+        minutes=decision_service.SCAN_INTERVAL_MIN,
+        id="decision_scan",
         replace_existing=True,
     )
     _scheduler.start()
@@ -68,6 +85,7 @@ app.include_router(datasource_router)
 app.include_router(etf_router)
 app.include_router(strategy_router)
 app.include_router(backtest_router)
+app.include_router(decision_router)
 app.include_router(alerts_router)
 
 
