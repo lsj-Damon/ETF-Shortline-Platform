@@ -1,9 +1,11 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import math
+import threading
 from collections import deque
 from datetime import date, datetime, timedelta
 from typing import AsyncIterator
@@ -21,12 +23,22 @@ logger = logging.getLogger(__name__)
 SCAN_INTERVAL_MIN = 5
 MAX_EVENTS = 200
 MAX_SNAPSHOTS = 200
+_CHART_TTL_SECONDS = {
+    "5m": 8,
+    "15m": 12,
+    "daily": 60,
+}
 
 _SUPPORTED_TIMEFRAMES = ("5m", "15m", "daily")
 _snapshots: dict[str, dict[str, dict]] = {timeframe: {} for timeframe in _SUPPORTED_TIMEFRAMES}
 _events: deque[dict] = deque(maxlen=MAX_EVENTS)
 _subscribers: list[asyncio.Queue] = []
 _last_scan_at: dict[str, datetime | None] = {timeframe: None for timeframe in _SUPPORTED_TIMEFRAMES}
+_board_cache: dict[str, dict] = {}
+_chart_cache: dict[tuple[str, str, int], dict] = {}
+_scan_locks: dict[str, threading.Lock] = {timeframe: threading.Lock() for timeframe in _SUPPORTED_TIMEFRAMES}
+_chart_locks: dict[tuple[str, str, int], threading.Lock] = {}
+_cache_guard = threading.Lock()
 
 _ACTION_LABELS = {
     "buy": "买入",
@@ -173,6 +185,169 @@ def _select_markers(candidates: list[dict], limit: int) -> list[dict]:
     for item in chosen:
         item.pop("_bar_index", None)
     return chosen
+
+
+def _chart_ttl_seconds(timeframe: str) -> int:
+    return _CHART_TTL_SECONDS.get(timeframe, 15)
+
+
+def _chart_cache_key(symbol: str, timeframe: str, limit: int) -> tuple[str, str, int]:
+    return (symbol, timeframe, limit)
+
+
+def _current_scan_marker(timeframe: str) -> str | None:
+    return _serialize_dt(_last_scan_at.get(timeframe))
+
+
+def _get_chart_lock(key: tuple[str, str, int]) -> threading.Lock:
+    with _cache_guard:
+        return _chart_locks.setdefault(key, threading.Lock())
+
+
+def _invalidate_board_cache(timeframe: str | None = None) -> None:
+    with _cache_guard:
+        if timeframe:
+            _board_cache.pop(timeframe, None)
+            return
+        _board_cache.clear()
+
+
+def _build_board_cache_payload(timeframe: str) -> dict:
+    live_items = sorted(
+        _snapshots.get(timeframe, {}).values(),
+        key=lambda item: (item.get("score", 0), item.get("confidence", 0)),
+        reverse=True,
+    )
+    plan_items = [
+        {
+            "symbol": item["symbol"],
+            "name": item["name"],
+            "timeframe": item["timeframe"],
+            "action": item["action"],
+            "action_label": item["action_label"],
+            "confidence": item["confidence"],
+            "bias": item["plan"]["bias"],
+            "focus": item["plan"]["focus"],
+            "risk_note": item["plan"]["risk_note"],
+            "scenarios": item["plan"]["scenarios"],
+            "key_levels": item["plan"]["key_levels"],
+            "scanned_at": item["scanned_at"],
+        }
+        for item in sorted(
+            _snapshots.get(timeframe, {}).values(),
+            key=lambda item: item.get("score", 0),
+            reverse=True,
+        )
+    ]
+    event_items = [item for item in _events if item.get("timeframe") == timeframe]
+    return {
+        "timeframe": timeframe,
+        "live_items": live_items,
+        "plan_items": plan_items,
+        "event_items": event_items,
+        "last_scan_at": _current_scan_marker(timeframe),
+        "generated_at": datetime.now().isoformat(),
+    }
+
+
+def _get_board_cache_payload(timeframe: str) -> tuple[dict, bool]:
+    expected_marker = _current_scan_marker(timeframe)
+    with _cache_guard:
+        cached = _board_cache.get(timeframe)
+        if cached and cached.get("last_scan_at") == expected_marker:
+            return cached, True
+    payload = _build_board_cache_payload(timeframe)
+    with _cache_guard:
+        _board_cache[timeframe] = payload
+    return payload, False
+
+
+def _invalidate_chart_cache(timeframe: str | None = None, symbol: str | None = None) -> None:
+    with _cache_guard:
+        if timeframe is None and symbol is None:
+            _chart_cache.clear()
+            return
+        keys_to_delete = [
+            key
+            for key in _chart_cache
+            if (timeframe is None or key[1] == timeframe) and (symbol is None or key[0] == symbol)
+        ]
+        for key in keys_to_delete:
+            _chart_cache.pop(key, None)
+
+
+def _store_chart_cache_entry(key: tuple[str, str, int], payload: dict, timeframe: str, scan_marker: str | None) -> dict:
+    entry = {
+        "payload": payload,
+        "generated_at": datetime.now().isoformat(),
+        "expires_at": datetime.now() + timedelta(seconds=_chart_ttl_seconds(timeframe)),
+        "scan_marker": scan_marker,
+    }
+    with _cache_guard:
+        _chart_cache[key] = entry
+    return entry
+
+
+def _get_chart_cache_entry(key: tuple[str, str, int]) -> dict | None:
+    with _cache_guard:
+        return _chart_cache.get(key)
+
+
+def _with_chart_cache_meta(payload: dict, cache_hit: bool, is_stale: bool, generated_at: str | None) -> dict:
+    response = copy.deepcopy(payload)
+    response.setdefault("meta", {})
+    response["meta"].update(
+        {
+            "cache_hit": cache_hit,
+            "is_stale": is_stale,
+            "generated_at": generated_at,
+        }
+    )
+    return response
+
+
+def _timeframe_has_snapshot(timeframe: str) -> bool:
+    return _last_scan_at.get(timeframe) is not None
+
+
+def _timeframe_is_stale(timeframe: str, max_age_seconds: int) -> bool:
+    last_scan = _last_scan_at.get(timeframe)
+    if last_scan is None:
+        return True
+    return datetime.now() - last_scan > timedelta(seconds=max_age_seconds)
+
+
+def _run_scan_locked(timeframe: str, max_age_seconds: int, allow_stale: bool) -> None:
+    lock = _scan_locks[timeframe]
+    has_snapshot = _timeframe_has_snapshot(timeframe)
+    is_stale = _timeframe_is_stale(timeframe, max_age_seconds)
+    if not has_snapshot:
+        with lock:
+            if not _timeframe_has_snapshot(timeframe):
+                scan_once([timeframe])
+        return
+    if not is_stale:
+        return
+    if allow_stale:
+        if not lock.acquire(blocking=False):
+            return
+
+        def _background_scan() -> None:
+            try:
+                if _timeframe_is_stale(timeframe, max_age_seconds):
+                    scan_once([timeframe])
+            finally:
+                lock.release()
+
+        threading.Thread(
+            target=_background_scan,
+            name=f"decision-scan-{timeframe}",
+            daemon=True,
+        ).start()
+        return
+    with lock:
+        if _timeframe_is_stale(timeframe, max_age_seconds):
+            scan_once([timeframe])
 
 
 def _pick_scan_targets(db: Session, timeframes: list[str] | None = None) -> dict[str, list[dict]]:
@@ -711,102 +886,11 @@ def _build_chart_markers(df: pd.DataFrame, snapshot: dict) -> list[dict]:
     return sorted(final_buy + final_sell, key=lambda value: str(value.get("ts", "")))
 
 
-def scan_once(timeframes: list[str] | None = None) -> list[dict]:
-    fired_events: list[dict] = []
-    scanned_at = datetime.now()
-    active_timeframes = [_normalize_timeframe(item) for item in timeframes] if timeframes else list(_SUPPORTED_TIMEFRAMES)
+def _build_live_decision_chart_payload(symbol: str, timeframe: str, limit: int, snapshot: dict) -> dict:
     db = SessionLocal()
     try:
         market = MarketDataService(db)
-        grouped_targets = _pick_scan_targets(db, active_timeframes)
-
-        for timeframe in active_timeframes:
-            next_snapshots: dict[str, dict] = {}
-            for target in grouped_targets.get(timeframe, [])[:MAX_SNAPSHOTS]:
-                symbol = target["symbol"]
-                try:
-                    bars = market.get_bars(symbol=symbol, timeframe=timeframe, limit=200)
-                    if len(bars) < 30:
-                        continue
-                    try:
-                        quote = market.get_quote(symbol)
-                    except Exception:
-                        quote = None
-
-                    snapshot = _compute_snapshot(
-                        symbol=symbol,
-                        name=target["name"],
-                        timeframe=timeframe,
-                        bars=bars,
-                        quote=quote,
-                        scanned_at=scanned_at,
-                    )
-                    if not snapshot:
-                        continue
-
-                    previous = _snapshots.get(timeframe, {}).get(symbol)
-                    next_snapshots[symbol] = snapshot
-                    event = _build_event(previous, snapshot, scanned_at)
-                    if event:
-                        _push_event(event)
-                        fired_events.append(event)
-                except Exception as exc:
-                    logger.warning("decision scan failed for %s %s: %s", symbol, timeframe, exc)
-
-            _snapshots[timeframe] = next_snapshots
-            _last_scan_at[timeframe] = scanned_at
-    finally:
-        db.close()
-    return fired_events
-
-
-def ensure_fresh(timeframe: str | None = None, max_age_seconds: int = SCAN_INTERVAL_MIN * 60) -> None:
-    active_timeframes = [_normalize_timeframe(timeframe)] if timeframe else list(_SUPPORTED_TIMEFRAMES)
-    stale = False
-    for item in active_timeframes:
-        if not _snapshots.get(item) or _last_scan_at.get(item) is None:
-            stale = True
-            break
-        if datetime.now() - _last_scan_at[item] > timedelta(seconds=max_age_seconds):
-            stale = True
-            break
-    if stale:
-        scan_once(active_timeframes)
-
-
-def get_live_decisions(limit: int = 20, timeframe: str | None = None) -> dict:
-    selected_timeframe = _normalize_timeframe(timeframe)
-    ensure_fresh(selected_timeframe)
-    items = sorted(
-        _snapshots.get(selected_timeframe, {}).values(),
-        key=lambda item: (item.get("score", 0), item.get("confidence", 0)),
-        reverse=True,
-    )[:limit]
-    return {
-        "items": items,
-        "timeframe": selected_timeframe,
-        "last_scan_at": _serialize_dt(_last_scan_at.get(selected_timeframe)),
-        "count": len(items),
-    }
-
-
-def get_live_decision(symbol: str, timeframe: str | None = None) -> dict | None:
-    selected_timeframe = _normalize_timeframe(timeframe)
-    ensure_fresh(selected_timeframe)
-    return _snapshots.get(selected_timeframe, {}).get(symbol)
-
-
-def get_live_decision_chart(symbol: str, timeframe: str | None = None, limit: int = 240) -> dict | None:
-    selected_timeframe = _normalize_timeframe(timeframe)
-    chart_limit = max(60, min(int(limit or 240), 500))
-    snapshot = get_live_decision(symbol, timeframe=selected_timeframe)
-    if not snapshot:
-        return None
-
-    db = SessionLocal()
-    try:
-        market = MarketDataService(db)
-        chart_source = market.get_recent_bars(symbol=symbol, timeframe=selected_timeframe, limit=chart_limit)
+        chart_source = market.get_recent_bars(symbol=symbol, timeframe=timeframe, limit=limit)
     finally:
         db.close()
 
@@ -870,34 +954,181 @@ def get_live_decision_chart(symbol: str, timeframe: str | None = None, limit: in
     }
 
 
+def scan_once(timeframes: list[str] | None = None) -> list[dict]:
+    fired_events: list[dict] = []
+    scanned_at = datetime.now()
+    active_timeframes = [_normalize_timeframe(item) for item in timeframes] if timeframes else list(_SUPPORTED_TIMEFRAMES)
+    db = SessionLocal()
+    try:
+        market = MarketDataService(db)
+        grouped_targets = _pick_scan_targets(db, active_timeframes)
+
+        for timeframe in active_timeframes:
+            next_snapshots: dict[str, dict] = {}
+            for target in grouped_targets.get(timeframe, [])[:MAX_SNAPSHOTS]:
+                symbol = target["symbol"]
+                try:
+                    bars = market.get_bars(symbol=symbol, timeframe=timeframe, limit=200)
+                    if len(bars) < 30:
+                        continue
+                    try:
+                        quote = market.get_quote(symbol)
+                    except Exception:
+                        quote = None
+
+                    snapshot = _compute_snapshot(
+                        symbol=symbol,
+                        name=target["name"],
+                        timeframe=timeframe,
+                        bars=bars,
+                        quote=quote,
+                        scanned_at=scanned_at,
+                    )
+                    if not snapshot:
+                        continue
+
+                    previous = _snapshots.get(timeframe, {}).get(symbol)
+                    next_snapshots[symbol] = snapshot
+                    event = _build_event(previous, snapshot, scanned_at)
+                    if event:
+                        _push_event(event)
+                        fired_events.append(event)
+                except Exception as exc:
+                    logger.warning("decision scan failed for %s %s: %s", symbol, timeframe, exc)
+
+            _snapshots[timeframe] = next_snapshots
+            _last_scan_at[timeframe] = scanned_at
+            with _cache_guard:
+                _board_cache[timeframe] = _build_board_cache_payload(timeframe)
+    finally:
+        db.close()
+    return fired_events
+
+
+def ensure_fresh(
+    timeframe: str | None = None,
+    max_age_seconds: int = SCAN_INTERVAL_MIN * 60,
+    allow_stale: bool = True,
+) -> None:
+    active_timeframes = [_normalize_timeframe(timeframe)] if timeframe else list(_SUPPORTED_TIMEFRAMES)
+    for item in active_timeframes:
+        _run_scan_locked(item, max_age_seconds=max_age_seconds, allow_stale=allow_stale)
+
+
+def get_live_decisions(limit: int = 20, timeframe: str | None = None) -> dict:
+    selected_timeframe = _normalize_timeframe(timeframe)
+    ensure_fresh(selected_timeframe)
+    board_payload, cache_hit = _get_board_cache_payload(selected_timeframe)
+    items = board_payload["live_items"][:limit]
+    return {
+        "items": items,
+        "timeframe": selected_timeframe,
+        "last_scan_at": board_payload["last_scan_at"],
+        "count": len(items),
+        "cache_hit": cache_hit,
+        "generated_at": board_payload["generated_at"],
+    }
+
+
+def get_live_decision(symbol: str, timeframe: str | None = None) -> dict | None:
+    selected_timeframe = _normalize_timeframe(timeframe)
+    ensure_fresh(selected_timeframe)
+    return _snapshots.get(selected_timeframe, {}).get(symbol)
+
+
+def _refresh_chart_cache_entry(symbol: str, timeframe: str, limit: int) -> dict | None:
+    snapshot = get_live_decision(symbol, timeframe=timeframe)
+    if not snapshot:
+        return None
+    payload = _build_live_decision_chart_payload(symbol=symbol, timeframe=timeframe, limit=limit, snapshot=snapshot)
+    return _store_chart_cache_entry(
+        key=_chart_cache_key(symbol, timeframe, limit),
+        payload=payload,
+        timeframe=timeframe,
+        scan_marker=snapshot.get("scanned_at"),
+    )
+
+
+def _schedule_chart_cache_refresh(symbol: str, timeframe: str, limit: int) -> None:
+    key = _chart_cache_key(symbol, timeframe, limit)
+    lock = _get_chart_lock(key)
+    if not lock.acquire(blocking=False):
+        return
+
+    def _runner() -> None:
+        try:
+            _refresh_chart_cache_entry(symbol=symbol, timeframe=timeframe, limit=limit)
+        finally:
+            lock.release()
+
+    threading.Thread(
+        target=_runner,
+        name=f"decision-chart-{symbol}-{timeframe}-{limit}",
+        daemon=True,
+    ).start()
+
+
+def get_live_decision_chart(symbol: str, timeframe: str | None = None, limit: int = 240) -> dict | None:
+    selected_timeframe = _normalize_timeframe(timeframe)
+    chart_limit = max(60, min(int(limit or 240), 500))
+    snapshot = get_live_decision(symbol, timeframe=selected_timeframe)
+    if not snapshot:
+        return None
+    key = _chart_cache_key(symbol, selected_timeframe, chart_limit)
+    current_scan_marker = snapshot.get("scanned_at")
+    cached = _get_chart_cache_entry(key)
+    now = datetime.now()
+    if cached:
+        is_expired = now > cached["expires_at"]
+        scan_mismatch = cached.get("scan_marker") != current_scan_marker
+        if not is_expired and not scan_mismatch:
+            return _with_chart_cache_meta(
+                cached["payload"],
+                cache_hit=True,
+                is_stale=False,
+                generated_at=cached["generated_at"],
+            )
+        _schedule_chart_cache_refresh(symbol=symbol, timeframe=selected_timeframe, limit=chart_limit)
+        return _with_chart_cache_meta(
+            cached["payload"],
+            cache_hit=True,
+            is_stale=True,
+            generated_at=cached["generated_at"],
+        )
+
+    lock = _get_chart_lock(key)
+    with lock:
+        cached = _get_chart_cache_entry(key)
+        now = datetime.now()
+        if cached and now <= cached["expires_at"] and cached.get("scan_marker") == current_scan_marker:
+            return _with_chart_cache_meta(
+                cached["payload"],
+                cache_hit=True,
+                is_stale=False,
+                generated_at=cached["generated_at"],
+            )
+        cached = _refresh_chart_cache_entry(symbol=symbol, timeframe=selected_timeframe, limit=chart_limit)
+        if not cached:
+            return None
+        return _with_chart_cache_meta(
+            cached["payload"],
+            cache_hit=False,
+            is_stale=False,
+            generated_at=cached["generated_at"],
+        )
+
+
 def get_latest_plans(limit: int = 20, timeframe: str | None = None) -> dict:
     selected_timeframe = _normalize_timeframe(timeframe)
     ensure_fresh(selected_timeframe)
-    items = sorted(
-        _snapshots.get(selected_timeframe, {}).values(),
-        key=lambda item: item.get("score", 0),
-        reverse=True,
-    )[:limit]
+    board_payload, cache_hit = _get_board_cache_payload(selected_timeframe)
+    items = board_payload["plan_items"][:limit]
     return {
-        "items": [
-            {
-                "symbol": item["symbol"],
-                "name": item["name"],
-                "timeframe": item["timeframe"],
-                "action": item["action"],
-                "action_label": item["action_label"],
-                "confidence": item["confidence"],
-                "bias": item["plan"]["bias"],
-                "focus": item["plan"]["focus"],
-                "risk_note": item["plan"]["risk_note"],
-                "scenarios": item["plan"]["scenarios"],
-                "key_levels": item["plan"]["key_levels"],
-                "scanned_at": item["scanned_at"],
-            }
-            for item in items
-        ],
+        "items": items,
         "timeframe": selected_timeframe,
-        "last_scan_at": _serialize_dt(_last_scan_at.get(selected_timeframe)),
+        "last_scan_at": board_payload["last_scan_at"],
+        "cache_hit": cache_hit,
+        "generated_at": board_payload["generated_at"],
     }
 
 
@@ -921,19 +1152,25 @@ def get_plan(symbol: str, timeframe: str | None = None) -> dict | None:
 
 def get_recent_events(limit: int = 30, timeframe: str | None = None) -> list[dict]:
     selected_timeframe = _normalize_timeframe(timeframe) if timeframe else None
-    items = list(_events)
     if selected_timeframe:
-        items = [item for item in items if item.get("timeframe") == selected_timeframe]
+        ensure_fresh(selected_timeframe)
+        board_payload, _cache_hit = _get_board_cache_payload(selected_timeframe)
+        items = board_payload["event_items"]
+    else:
+        items = list(_events)
     return items[:limit]
 
 
 def get_state_meta(timeframe: str | None = None) -> dict:
     selected_timeframe = _normalize_timeframe(timeframe)
+    board_payload, cache_hit = _get_board_cache_payload(selected_timeframe)
     return {
         "timeframe": selected_timeframe,
-        "last_scan_at": _serialize_dt(_last_scan_at.get(selected_timeframe)),
+        "last_scan_at": board_payload["last_scan_at"],
         "tracked": len(_snapshots.get(selected_timeframe, {})),
         "available_timeframes": list(_SUPPORTED_TIMEFRAMES),
+        "cache_hit": cache_hit,
+        "generated_at": board_payload["generated_at"],
     }
 
 

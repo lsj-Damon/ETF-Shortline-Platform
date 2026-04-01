@@ -1,11 +1,23 @@
 import { Button, Card, Col, Empty, Progress, Row, Segmented, Space, Tag, Typography, message } from 'antd'
 import { ReloadOutlined, ThunderboltOutlined } from '@ant-design/icons'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { getDecisionChart, getDecisionDetail, getLatestPlans, getLiveDecisions, getRecentDecisionEvents, scanDecisions } from '../api/decision'
 import KlineChart from '../components/KlineChart'
 import './DecisionCenterPage.css'
 
 const CHART_POLL_MS = 25000
+
+type BoardPayload = {
+  items: any[]
+  events: any[]
+  plans: any[]
+  lastScanAt: string | null
+}
+
+type PanelPayload = {
+  detail: any
+  chart: any
+}
 
 const scoreLabels: Record<string, string> = {
   trend: '趋势',
@@ -51,6 +63,10 @@ function formatTime(value?: string | null) {
   return date.toLocaleString('zh-CN', { hour12: false })
 }
 
+function panelCacheKey(symbol: string, timeframe: string) {
+  return `${timeframe}:${symbol}`
+}
+
 export default function DecisionCenterPage() {
   const [items, setItems] = useState<any[]>([])
   const [plans, setPlans] = useState<any[]>([])
@@ -64,58 +80,189 @@ export default function DecisionCenterPage() {
   const [lastScanAt, setLastScanAt] = useState<string | null>(null)
   const [currentTimeframe, setCurrentTimeframe] = useState<string>('5m')
 
-  const selectedItem = useMemo(() => detail || items.find((item) => item.symbol === selectedSymbol) || null, [detail, items, selectedSymbol])
+  const boardCacheRef = useRef<Map<string, BoardPayload>>(new Map())
+  const detailCacheRef = useRef<Map<string, any>>(new Map())
+  const chartCacheRef = useRef<Map<string, any>>(new Map())
+  const boardRequestRef = useRef<Map<string, Promise<BoardPayload>>>(new Map())
+  const panelRequestRef = useRef<Map<string, Promise<PanelPayload>>>(new Map())
+  const boardRequestSeqRef = useRef(0)
+  const panelRequestSeqRef = useRef(0)
+  const selectedSymbolRef = useRef<string | null>(null)
+  const timeframeRef = useRef(currentTimeframe)
+
+  const selectedItem = useMemo(() => {
+    if (detail && detail.symbol === selectedSymbol && detail.timeframe === currentTimeframe) {
+      return detail
+    }
+    return items.find((item) => item.symbol === selectedSymbol) || null
+  }, [currentTimeframe, detail, items, selectedSymbol])
+  const activeChart = useMemo(() => {
+    if (decisionChart && decisionChart.symbol === selectedSymbol && decisionChart.timeframe === currentTimeframe) {
+      return decisionChart
+    }
+    return null
+  }, [currentTimeframe, decisionChart, selectedSymbol])
   const buyCount = useMemo(() => items.filter((item) => item.action === 'buy').length, [items])
   const planCount = useMemo(() => plans.length, [plans])
   const highConvictionCount = useMemo(() => items.filter((item) => item.confidence >= 75).length, [items])
 
-  const loadLiveBoard = async (preferredSymbol?: string | null, timeframeArg = currentTimeframe) => {
-    const [liveRes, eventRes, planRes] = await Promise.all([
-      getLiveDecisions(24, timeframeArg),
-      getRecentDecisionEvents(20, timeframeArg),
-      getLatestPlans(8, timeframeArg),
-    ])
-    const nextItems = liveRes.items || []
+  useEffect(() => {
+    selectedSymbolRef.current = selectedSymbol
+  }, [selectedSymbol])
+
+  useEffect(() => {
+    timeframeRef.current = currentTimeframe
+  }, [currentTimeframe])
+
+  const updateSelectedSymbol = (nextSymbol: string | null) => {
+    selectedSymbolRef.current = nextSymbol
+    setSelectedSymbol(nextSymbol)
+  }
+
+  const applyBoardPayload = (payload: BoardPayload, preferredSymbol?: string | null) => {
+    const nextItems = payload.items || []
     setItems(nextItems)
-    setEvents(eventRes.items || [])
-    setPlans(planRes.items || [])
-    setLastScanAt(liveRes.last_scan_at || eventRes.last_scan_at || planRes.last_scan_at || null)
+    setEvents(payload.events || [])
+    setPlans(payload.plans || [])
+    setLastScanAt(payload.lastScanAt || null)
 
     const preferred = preferredSymbol && nextItems.some((item: any) => item.symbol === preferredSymbol) ? preferredSymbol : null
-    const current = selectedSymbol && nextItems.some((item: any) => item.symbol === selectedSymbol) ? selectedSymbol : null
+    const current = selectedSymbolRef.current && nextItems.some((item: any) => item.symbol === selectedSymbolRef.current) ? selectedSymbolRef.current : null
     const nextSymbol = preferred || current || nextItems[0]?.symbol || null
 
     if (nextSymbol) {
-      setSelectedSymbol(nextSymbol)
-    } else {
-      setSelectedSymbol(null)
-      setDetail(null)
-      setDecisionChart(null)
+      if (selectedSymbolRef.current !== nextSymbol) {
+        updateSelectedSymbol(nextSymbol)
+      }
+      return
     }
+
+    updateSelectedSymbol(null)
+    setDetail(null)
+    setDecisionChart(null)
   }
 
-  const loadDetailPanel = async (symbol: string, timeframeArg = currentTimeframe, silent = false) => {
-    if (!silent) setChartLoading(true)
+  const fetchBoard = (timeframe: string, force = false): Promise<BoardPayload> => {
+    if (!force) {
+      const inFlight = boardRequestRef.current.get(timeframe)
+      if (inFlight) return inFlight
+    }
+
+    const request = Promise.all([
+      getLiveDecisions(24, timeframe),
+      getRecentDecisionEvents(20, timeframe),
+      getLatestPlans(8, timeframe),
+    ]).then(([liveRes, eventRes, planRes]) => ({
+      items: liveRes.items || [],
+      events: eventRes.items || [],
+      plans: planRes.items || [],
+      lastScanAt: liveRes.last_scan_at || eventRes.last_scan_at || planRes.last_scan_at || null,
+    }))
+
+    boardRequestRef.current.set(timeframe, request)
+    request.finally(() => {
+      if (boardRequestRef.current.get(timeframe) === request) {
+        boardRequestRef.current.delete(timeframe)
+      }
+    })
+    return request
+  }
+
+  const fetchPanel = (symbol: string, timeframe: string, force = false): Promise<PanelPayload> => {
+    const key = panelCacheKey(symbol, timeframe)
+    if (!force) {
+      const inFlight = panelRequestRef.current.get(key)
+      if (inFlight) return inFlight
+    }
+
+    const request = Promise.all([
+      getDecisionDetail(symbol, timeframe),
+      getDecisionChart(symbol, timeframe),
+    ]).then(([detailRes, chartRes]) => ({
+      detail: detailRes,
+      chart: chartRes,
+    }))
+
+    panelRequestRef.current.set(key, request)
+    request.finally(() => {
+      if (panelRequestRef.current.get(key) === request) {
+        panelRequestRef.current.delete(key)
+      }
+    })
+    return request
+  }
+
+  const loadLiveBoard = async (
+    preferredSymbol?: string | null,
+    timeframeArg = currentTimeframe,
+    options?: { force?: boolean },
+  ) => {
+    const force = Boolean(options?.force)
+    const cached = !force ? boardCacheRef.current.get(timeframeArg) : null
+    if (cached && timeframeRef.current === timeframeArg) {
+      applyBoardPayload(cached, preferredSymbol)
+    }
+
+    const seq = ++boardRequestSeqRef.current
+    const payload = await fetchBoard(timeframeArg, force)
+    boardCacheRef.current.set(timeframeArg, payload)
+
+    if (timeframeRef.current !== timeframeArg || seq !== boardRequestSeqRef.current) {
+      return payload
+    }
+
+    applyBoardPayload(payload, preferredSymbol)
+    return payload
+  }
+
+  const loadDetailPanel = async (
+    symbol: string,
+    timeframeArg = currentTimeframe,
+    silent = false,
+    force = false,
+  ) => {
+    const key = panelCacheKey(symbol, timeframeArg)
+    const cachedDetail = !force ? detailCacheRef.current.get(key) : null
+    const cachedChart = !force ? chartCacheRef.current.get(key) : null
+
+    if (cachedDetail) setDetail(cachedDetail)
+    if (cachedChart) setDecisionChart(cachedChart)
+
+    const shouldShowLoading = !silent && !(cachedDetail || cachedChart)
+    if (!silent && !cachedDetail) setDetail(null)
+    if (!silent && !cachedChart) setDecisionChart(null)
+    if (shouldShowLoading) setChartLoading(true)
+
+    const seq = ++panelRequestSeqRef.current
     try {
-      const [detailRes, chartRes] = await Promise.all([
-        getDecisionDetail(symbol, timeframeArg),
-        getDecisionChart(symbol, timeframeArg),
-      ])
-      setDetail(detailRes)
-      setDecisionChart(chartRes)
+      const payload = await fetchPanel(symbol, timeframeArg, force)
+      detailCacheRef.current.set(key, payload.detail)
+      chartCacheRef.current.set(key, payload.chart)
+
+      if (selectedSymbolRef.current !== symbol || timeframeRef.current !== timeframeArg || seq !== panelRequestSeqRef.current) {
+        return payload
+      }
+
+      setDetail(payload.detail)
+      setDecisionChart(payload.chart)
+      return payload
     } catch {
-      if (!silent) {
+      if (!silent && !cachedDetail && !cachedChart && seq === panelRequestSeqRef.current) {
         setDetail(null)
         setDecisionChart(null)
       }
+      return null
     } finally {
-      if (!silent) setChartLoading(false)
+      if (shouldShowLoading && seq === panelRequestSeqRef.current) {
+        setChartLoading(false)
+      }
     }
   }
 
   useEffect(() => {
     const init = async () => {
-      setLoading(true)
+      const hasCachedBoard = boardCacheRef.current.has(currentTimeframe)
+      setLoading(!hasCachedBoard)
       try {
         await loadLiveBoard(undefined, currentTimeframe)
       } catch (e: any) {
@@ -124,7 +271,7 @@ export default function DecisionCenterPage() {
         setLoading(false)
       }
     }
-    init()
+    void init()
   }, [currentTimeframe])
 
   useEffect(() => {
@@ -135,6 +282,7 @@ export default function DecisionCenterPage() {
   useEffect(() => {
     if (!selectedSymbol) return
     const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return
       void loadDetailPanel(selectedSymbol, currentTimeframe, true)
     }, CHART_POLL_MS)
     return () => window.clearInterval(timer)
@@ -147,13 +295,20 @@ export default function DecisionCenterPage() {
       try {
         const payload = JSON.parse(event.data)
         if (payload.timeframe !== currentTimeframe) return
+
         setEvents((prev) => {
           if (prev.some((item) => item.id === payload.id)) return prev
-          return [payload, ...prev].slice(0, 30)
+          const next = [payload, ...prev].slice(0, 30)
+          const cachedBoard = boardCacheRef.current.get(currentTimeframe)
+          if (cachedBoard) {
+            boardCacheRef.current.set(currentTimeframe, { ...cachedBoard, events: next })
+          }
+          return next
         })
-        await loadLiveBoard(payload.symbol || selectedSymbol, currentTimeframe)
-        if (selectedSymbol && payload.symbol === selectedSymbol) {
-          await loadDetailPanel(selectedSymbol, currentTimeframe, true)
+
+        await loadLiveBoard(payload.symbol || selectedSymbolRef.current, currentTimeframe, { force: true })
+        if (selectedSymbolRef.current && payload.symbol === selectedSymbolRef.current) {
+          void loadDetailPanel(selectedSymbolRef.current, currentTimeframe, true, true)
         }
       } catch {
         // ignore malformed events
@@ -163,16 +318,16 @@ export default function DecisionCenterPage() {
     return () => {
       es.close()
     }
-  }, [currentTimeframe, selectedSymbol])
+  }, [currentTimeframe])
 
   const handleRefresh = async () => {
     setRefreshing(true)
     try {
-      const preferredSymbol = selectedSymbol
+      const preferredSymbol = selectedSymbolRef.current
       await scanDecisions(currentTimeframe)
-      await loadLiveBoard(preferredSymbol, currentTimeframe)
+      await loadLiveBoard(preferredSymbol, currentTimeframe, { force: true })
       if (preferredSymbol) {
-        await loadDetailPanel(preferredSymbol, currentTimeframe, true)
+        await loadDetailPanel(preferredSymbol, currentTimeframe, true, true)
       }
       message.success('交易决策已刷新')
     } catch (e: any) {
@@ -239,7 +394,7 @@ export default function DecisionCenterPage() {
                     <div
                       key={`${item.timeframe}-${item.symbol}`}
                       className={`decision-rank-item ${selectedSymbol === item.symbol ? 'is-active' : ''}`}
-                      onClick={() => setSelectedSymbol(item.symbol)}
+                      onClick={() => updateSelectedSymbol(item.symbol)}
                     >
                       <div className="decision-rank-head">
                         <div>
@@ -326,12 +481,12 @@ export default function DecisionCenterPage() {
                       </div>
                       <Space size={[8, 8]} wrap>
                         {chartLoading && <Tag color="processing">图表更新中</Tag>}
-                        {decisionChart?.meta?.last_bar_ts && <Tag color="blue">最新 K 线 {formatTime(decisionChart.meta.last_bar_ts)}</Tag>}
-                        {decisionChart?.meta?.scanned_at && <Tag>决策扫描 {formatTime(decisionChart.meta.scanned_at)}</Tag>}
+                        {activeChart?.meta?.last_bar_ts && <Tag color="blue">最新 K 线 {formatTime(activeChart.meta.last_bar_ts)}</Tag>}
+                        {activeChart?.meta?.scanned_at && <Tag>决策扫描 {formatTime(activeChart.meta.scanned_at)}</Tag>}
                       </Space>
                     </div>
-                    <KlineChart chart={decisionChart} hideCard title="" height={420} />
-                    {!decisionChart?.meta?.has_candidates && (decisionChart?.bars?.length || 0) > 0 && (
+                    <KlineChart chart={activeChart} hideCard title="" height={420} />
+                    {!activeChart?.meta?.has_candidates && (activeChart?.bars?.length || 0) > 0 && (
                       <div className="decision-chart-note">当前模型下暂无高质量候选买卖点，图中仍保留关键价位辅助线供判断。</div>
                     )}
                   </div>
@@ -425,7 +580,7 @@ export default function DecisionCenterPage() {
               ) : (
                 <div className="decision-plan-queue">
                   {plans.map((plan) => (
-                    <div key={`${plan.timeframe}-${plan.symbol}`} className="decision-plan-queue-item" onClick={() => setSelectedSymbol(plan.symbol)}>
+                    <div key={`${plan.timeframe}-${plan.symbol}`} className="decision-plan-queue-item" onClick={() => updateSelectedSymbol(plan.symbol)}>
                       <div className="decision-rank-head">
                         <div>
                           <div className="decision-rank-name">{plan.symbol} {plan.name}</div>
