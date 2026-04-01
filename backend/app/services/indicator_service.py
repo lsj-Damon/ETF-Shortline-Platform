@@ -39,8 +39,9 @@ class IndicatorService:
         delta = close.diff()
         gain = delta.clip(lower=0).rolling(14).mean()
         loss = (-delta.clip(upper=0)).rolling(14).mean()
-        rs = gain / loss.replace(0, pd.NA)
-        data['rsi14'] = 100 - (100 / (1 + rs.astype(float)))
+        rs = gain / loss.replace(0, np.nan)
+        rs = pd.to_numeric(rs, errors='coerce')
+        data['rsi14'] = 100 - (100 / (1 + rs))
 
         # --- MACD (12,26,9) ---
         ema12 = close.ewm(span=12, adjust=False).mean()

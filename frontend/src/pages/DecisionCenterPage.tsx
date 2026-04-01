@@ -148,16 +148,26 @@ export default function DecisionCenterPage() {
       if (inFlight) return inFlight
     }
 
-    const request = Promise.all([
+    const request = Promise.allSettled([
       getLiveDecisions(24, timeframe),
       getRecentDecisionEvents(20, timeframe),
       getLatestPlans(8, timeframe),
-    ]).then(([liveRes, eventRes, planRes]) => ({
-      items: liveRes.items || [],
-      events: eventRes.items || [],
-      plans: planRes.items || [],
-      lastScanAt: liveRes.last_scan_at || eventRes.last_scan_at || planRes.last_scan_at || null,
-    }))
+    ]).then(([liveRes, eventRes, planRes]) => {
+      if (liveRes.status !== 'fulfilled') {
+        throw liveRes.reason
+      }
+
+      return {
+        items: liveRes.value.items || [],
+        events: eventRes.status === 'fulfilled' ? eventRes.value.items || [] : [],
+        plans: planRes.status === 'fulfilled' ? planRes.value.items || [] : [],
+        lastScanAt:
+          liveRes.value.last_scan_at
+          || (eventRes.status === 'fulfilled' ? eventRes.value.last_scan_at : null)
+          || (planRes.status === 'fulfilled' ? planRes.value.last_scan_at : null)
+          || null,
+      }
+    })
 
     boardRequestRef.current.set(timeframe, request)
     request.finally(() => {
