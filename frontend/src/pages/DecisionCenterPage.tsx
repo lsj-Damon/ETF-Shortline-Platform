@@ -1,8 +1,11 @@
-﻿import { Button, Card, Col, Empty, Progress, Row, Segmented, Space, Tag, Typography, message } from 'antd'
+import { Button, Card, Col, Empty, Progress, Row, Segmented, Space, Tag, Typography, message } from 'antd'
 import { ReloadOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import { useEffect, useMemo, useState } from 'react'
-import { getDecisionDetail, getLatestPlans, getLiveDecisions, getRecentDecisionEvents, scanDecisions } from '../api/decision'
+import { getDecisionChart, getDecisionDetail, getLatestPlans, getLiveDecisions, getRecentDecisionEvents, scanDecisions } from '../api/decision'
+import KlineChart from '../components/KlineChart'
 import './DecisionCenterPage.css'
+
+const CHART_POLL_MS = 25000
 
 const scoreLabels: Record<string, string> = {
   trend: '趋势',
@@ -53,9 +56,11 @@ export default function DecisionCenterPage() {
   const [plans, setPlans] = useState<any[]>([])
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null)
   const [detail, setDetail] = useState<any | null>(null)
+  const [decisionChart, setDecisionChart] = useState<any | null>(null)
   const [events, setEvents] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
+  const [chartLoading, setChartLoading] = useState(false)
   const [lastScanAt, setLastScanAt] = useState<string | null>(null)
   const [currentTimeframe, setCurrentTimeframe] = useState<string>('5m')
 
@@ -85,15 +90,26 @@ export default function DecisionCenterPage() {
     } else {
       setSelectedSymbol(null)
       setDetail(null)
+      setDecisionChart(null)
     }
   }
 
-  const loadDetail = async (symbol: string, timeframeArg = currentTimeframe) => {
+  const loadDetailPanel = async (symbol: string, timeframeArg = currentTimeframe, silent = false) => {
+    if (!silent) setChartLoading(true)
     try {
-      const detailRes = await getDecisionDetail(symbol, timeframeArg)
+      const [detailRes, chartRes] = await Promise.all([
+        getDecisionDetail(symbol, timeframeArg),
+        getDecisionChart(symbol, timeframeArg),
+      ])
       setDetail(detailRes)
+      setDecisionChart(chartRes)
     } catch {
-      setDetail(null)
+      if (!silent) {
+        setDetail(null)
+        setDecisionChart(null)
+      }
+    } finally {
+      if (!silent) setChartLoading(false)
     }
   }
 
@@ -113,7 +129,15 @@ export default function DecisionCenterPage() {
 
   useEffect(() => {
     if (!selectedSymbol) return
-    loadDetail(selectedSymbol, currentTimeframe)
+    void loadDetailPanel(selectedSymbol, currentTimeframe)
+  }, [selectedSymbol, currentTimeframe])
+
+  useEffect(() => {
+    if (!selectedSymbol) return
+    const timer = window.setInterval(() => {
+      void loadDetailPanel(selectedSymbol, currentTimeframe, true)
+    }, CHART_POLL_MS)
+    return () => window.clearInterval(timer)
   }, [selectedSymbol, currentTimeframe])
 
   useEffect(() => {
@@ -128,6 +152,9 @@ export default function DecisionCenterPage() {
           return [payload, ...prev].slice(0, 30)
         })
         await loadLiveBoard(payload.symbol || selectedSymbol, currentTimeframe)
+        if (selectedSymbol && payload.symbol === selectedSymbol) {
+          await loadDetailPanel(selectedSymbol, currentTimeframe, true)
+        }
       } catch {
         // ignore malformed events
       }
@@ -141,8 +168,12 @@ export default function DecisionCenterPage() {
   const handleRefresh = async () => {
     setRefreshing(true)
     try {
+      const preferredSymbol = selectedSymbol
       await scanDecisions(currentTimeframe)
-      await loadLiveBoard(selectedSymbol, currentTimeframe)
+      await loadLiveBoard(preferredSymbol, currentTimeframe)
+      if (preferredSymbol) {
+        await loadDetailPanel(preferredSymbol, currentTimeframe, true)
+      }
       message.success('交易决策已刷新')
     } catch (e: any) {
       message.error(e?.response?.data?.detail || '刷新交易决策失败')
@@ -285,6 +316,24 @@ export default function DecisionCenterPage() {
                   <div className="decision-summary">
                     <div><strong>当前建议：</strong>{selectedItem.summary}</div>
                     <div style={{ marginTop: 8 }}><strong>计划失效：</strong>{selectedItem.invalid_condition}</div>
+                  </div>
+
+                  <div className="decision-chart-section">
+                    <div className="decision-chart-header">
+                      <div>
+                        <div className="decision-chart-title">实时 K 线与候选买卖点</div>
+                        <div className="decision-chart-subtitle">候选点由当前决策模型实时推导，优先显示当前最值得关注的支撑、突破、兑现与防守位置。</div>
+                      </div>
+                      <Space size={[8, 8]} wrap>
+                        {chartLoading && <Tag color="processing">图表更新中</Tag>}
+                        {decisionChart?.meta?.last_bar_ts && <Tag color="blue">最新 K 线 {formatTime(decisionChart.meta.last_bar_ts)}</Tag>}
+                        {decisionChart?.meta?.scanned_at && <Tag>决策扫描 {formatTime(decisionChart.meta.scanned_at)}</Tag>}
+                      </Space>
+                    </div>
+                    <KlineChart chart={decisionChart} hideCard title="" height={420} />
+                    {!decisionChart?.meta?.has_candidates && (decisionChart?.bars?.length || 0) > 0 && (
+                      <div className="decision-chart-note">当前模型下暂无高质量候选买卖点，图中仍保留关键价位辅助线供判断。</div>
+                    )}
                   </div>
                 </>
               ) : (

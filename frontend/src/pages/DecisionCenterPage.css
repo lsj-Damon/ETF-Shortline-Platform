@@ -283,6 +283,43 @@
   line-height: 1.8;
 }
 
+.decision-chart-section {
+  margin-top: 18px;
+  padding: 18px;
+  border-radius: 22px;
+  border: 1px solid rgba(25, 35, 49, 0.06);
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.decision-chart-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.decision-chart-title {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.decision-chart-subtitle {
+  margin-top: 6px;
+  color: var(--dc-muted);
+  font-size: 13px;
+  line-height: 1.7;
+  max-width: 720px;
+}
+
+.decision-chart-note {
+  margin-top: 10px;
+  color: var(--dc-muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
 .decision-plan-banner {
   display: flex;
   justify-content: space-between;

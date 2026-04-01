@@ -5,7 +5,7 @@ import json
 import logging
 import math
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import AsyncIterator
 
 import pandas as pd
@@ -45,6 +45,32 @@ def _normalize_timeframe(timeframe: str | None) -> str:
 
 def _serialize_dt(value):
     return value.isoformat() if hasattr(value, "isoformat") else value
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if value is None or value is pd.NA:
+        return None
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if hasattr(value, "item") and callable(getattr(value, "item")):
+        try:
+            return _json_safe(value.item())
+        except Exception:
+            pass
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    return value
 
 
 def _as_float(value, default: float = 0.0) -> float:
@@ -92,6 +118,61 @@ def _trend_bias_from_score(score: int) -> str:
     if score <= 6:
         return "偏空"
     return "中性"
+
+
+def _candidate_window_size(timeframe: str) -> int:
+    return {
+        "5m": 48,
+        "15m": 32,
+        "daily": 30,
+    }.get(timeframe, 36)
+
+
+def _ranges_overlap(a_low: float, a_high: float, b_low: float, b_high: float) -> bool:
+    if min(a_low, a_high, b_low, b_high) <= 0:
+        return False
+    return max(a_low, b_low) <= min(a_high, b_high)
+
+
+def _coerce_chart_frame(bars: list[dict]) -> pd.DataFrame:
+    df = pd.DataFrame(bars)
+    if df.empty or "ts" not in df.columns:
+        return pd.DataFrame()
+    for col in ("open", "high", "low", "close", "volume"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        elif col == "volume":
+            df[col] = 0.0
+    df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+    df = df.dropna(subset=["ts", "open", "high", "low", "close"]).sort_values("ts").reset_index(drop=True)
+    if "volume" not in df.columns:
+        df["volume"] = 0.0
+    return df
+
+
+def _export_chart_bars(df: pd.DataFrame) -> list[dict]:
+    if df.empty:
+        return []
+    default_cols = ["ts", "open", "high", "low", "close", "volume"]
+    indicator_cols = [col for col in df.columns if col not in default_cols]
+    export_cols = [col for col in default_cols if col in df.columns] + indicator_cols
+    return [_json_safe(item) for item in df[export_cols].to_dict(orient="records")]
+
+
+def _select_markers(candidates: list[dict], limit: int) -> list[dict]:
+    if limit <= 0:
+        return []
+    chosen: list[dict] = []
+    for item in sorted(candidates, key=lambda value: (value["score"], value["_bar_index"]), reverse=True):
+        if any(abs(item["_bar_index"] - existing["_bar_index"]) <= 2 for existing in chosen):
+            continue
+        chosen.append(item)
+        if len(chosen) >= limit:
+            break
+    chosen = sorted(chosen, key=lambda value: value["_bar_index"])
+    for item in chosen:
+        item.pop("_bar_index", None)
+    return chosen
 
 
 def _pick_scan_targets(db: Session, timeframes: list[str] | None = None) -> dict[str, list[dict]]:
@@ -435,6 +516,201 @@ def _build_event(previous: dict | None, current: dict, scanned_at: datetime) -> 
     }
 
 
+def _build_chart_markers(df: pd.DataFrame, snapshot: dict) -> list[dict]:
+    if df.empty or len(df) < 2:
+        return []
+
+    buy_zone = snapshot.get("buy_zone") or {}
+    sell_zone = snapshot.get("sell_zone") or {}
+    buy_low = _as_float(buy_zone.get("low"))
+    buy_high = _as_float(buy_zone.get("high"))
+    sell_low = _as_float(sell_zone.get("low"))
+    sell_high = _as_float(sell_zone.get("high"))
+    breakout_trigger = _as_float(snapshot.get("breakout_trigger"))
+    stop_loss = _as_float(snapshot.get("stop_loss"))
+    action = snapshot.get("action", "watch")
+    latest_total_score = int(snapshot.get("score", 0) or 0)
+
+    start_index = max(1, len(df) - _candidate_window_size(str(snapshot.get("timeframe", "5m"))))
+    buy_candidates: list[dict] = []
+    sell_candidates: list[dict] = []
+
+    for idx in range(start_index, len(df)):
+        row = df.iloc[idx]
+        prev = df.iloc[idx - 1]
+
+        close = _as_float(row.get("close"))
+        open_price = _as_float(row.get("open"))
+        low = _as_float(row.get("low"))
+        high = _as_float(row.get("high"))
+        prev_close = _as_float(prev.get("close"), close)
+        ma5 = _as_float(row.get("ma5"))
+        ma10 = _as_float(row.get("ma10"))
+        ma20 = _as_float(row.get("ma20"))
+        macd = _as_float(row.get("macd"))
+        macd_signal = _as_float(row.get("macd_signal"))
+        macd_hist = _as_float(row.get("macd_hist"))
+        prev_macd = _as_float(prev.get("macd"))
+        prev_macd_signal = _as_float(prev.get("macd_signal"))
+        prev_macd_hist = _as_float(prev.get("macd_hist"))
+        k_value = _as_float(row.get("kdj_k"))
+        d_value = _as_float(row.get("kdj_d"))
+        prev_k = _as_float(prev.get("kdj_k"))
+        prev_d = _as_float(prev.get("kdj_d"))
+        volume = _as_float(row.get("volume"))
+        volume_ma20 = _as_float(row.get("volume_ma20"))
+        vol_ratio = volume / volume_ma20 if volume_ma20 > 0 else 1.0
+
+        macd_cross = prev_macd <= prev_macd_signal and macd > macd_signal
+        kdj_cross = prev_k <= prev_d and k_value > d_value
+        kdj_dead = prev_k >= prev_d and k_value < d_value and max(k_value, d_value) >= 60
+        price_over_ma20 = ma20 <= 0 or close >= ma20 * 0.985
+        above_short_ma = (ma5 > 0 and close >= ma5) or (ma10 > 0 and close >= ma10)
+
+        in_buy_zone = buy_low > 0 and buy_high > 0 and (
+            _ranges_overlap(low, high, buy_low, buy_high)
+            or buy_low <= close <= buy_high
+        )
+        if in_buy_zone and price_over_ma20 and vol_ratio >= 0.75 and (macd_cross or kdj_cross or above_short_ma):
+            score = 34
+            if macd_cross:
+                score += 18
+            if kdj_cross:
+                score += 14
+            if above_short_ma:
+                score += 8
+            if ma20 > 0 and close >= ma20:
+                score += 10
+            if vol_ratio >= 1.0:
+                score += 12
+            elif vol_ratio >= 0.85:
+                score += 7
+            reasons = []
+            if macd_cross:
+                reasons.append("MACD金叉")
+            if kdj_cross:
+                reasons.append("KDJ金叉")
+            if above_short_ma:
+                reasons.append("收盘站回短均线")
+            if vol_ratio >= 1.0:
+                reasons.append("量能配合")
+            buy_candidates.append(
+                {
+                    "ts": _serialize_dt(row.get("ts")),
+                    "side": "buy",
+                    "kind": "support_rebound",
+                    "label": "候选买点",
+                    "price": _round_price(low * 0.997 if low > 0 else close),
+                    "reason": f"回踩买入区并出现{' / '.join(reasons[:2]) or '反弹'}确认",
+                    "score": score,
+                    "_bar_index": idx,
+                }
+            )
+
+        breakout_now = breakout_trigger > 0 and prev_close <= breakout_trigger and close > breakout_trigger
+        trend_confirm = (ma5 > 0 and ma10 > 0 and ma5 >= ma10) or macd >= macd_signal
+        if breakout_now and vol_ratio >= 1.0 and trend_confirm:
+            score = 42
+            if vol_ratio >= 1.2:
+                score += 14
+            elif vol_ratio >= 1.05:
+                score += 8
+            if macd >= macd_signal:
+                score += 12
+            if ma5 > 0 and ma10 > 0 and ma5 >= ma10:
+                score += 10
+            buy_candidates.append(
+                {
+                    "ts": _serialize_dt(row.get("ts")),
+                    "side": "buy",
+                    "kind": "breakout_confirm",
+                    "label": "候选买点",
+                    "price": _round_price(min(close, breakout_trigger) if close > 0 else breakout_trigger),
+                    "reason": "放量突破关键价，形成追踪买点",
+                    "score": score,
+                    "_bar_index": idx,
+                }
+            )
+
+        in_sell_zone = sell_low > 0 and sell_high > 0 and (
+            _ranges_overlap(low, high, sell_low, sell_high)
+            or sell_low <= close <= sell_high
+        )
+        candle_range = max(high - low, 0.0)
+        upper_shadow = max(high - max(open_price, close), 0.0)
+        long_upper_shadow = candle_range > 0 and upper_shadow / candle_range >= 0.35 and close < high
+        macd_soften = macd_hist < prev_macd_hist or macd < macd_signal
+        if in_sell_zone and (macd_soften or kdj_dead or long_upper_shadow or latest_total_score < 80):
+            score = 36
+            if macd_soften:
+                score += 16
+            if kdj_dead:
+                score += 14
+            if long_upper_shadow:
+                score += 10
+            if latest_total_score < 80:
+                score += 6
+            reasons = []
+            if macd_soften:
+                reasons.append("MACD动能转弱")
+            if kdj_dead:
+                reasons.append("KDJ高位死叉")
+            if long_upper_shadow:
+                reasons.append("冲高回落")
+            sell_candidates.append(
+                {
+                    "ts": _serialize_dt(row.get("ts")),
+                    "side": "sell",
+                    "kind": "take_profit",
+                    "label": "候选卖点",
+                    "price": _round_price(high * 1.003 if high > 0 else close),
+                    "reason": f"进入卖出区并出现{' / '.join(reasons[:2]) or '动能转弱'}",
+                    "score": score,
+                    "_bar_index": idx,
+                }
+            )
+
+        stop_break = stop_loss > 0 and prev_close >= stop_loss and close < stop_loss
+        breakdown_now = ma20 > 0 and prev_close >= ma20 and close < ma20
+        bearish_stack = ma10 > 0 and ma20 > 0 and close < ma10 < ma20 and macd < macd_signal
+        if stop_break or (breakdown_now and bearish_stack):
+            score = 52
+            if stop_break:
+                score += 18
+            if breakdown_now:
+                score += 10
+            if bearish_stack:
+                score += 10
+            reason = "跌破止损/关键支撑，卖点优先" if stop_break else "跌破关键支撑并转入弱势结构"
+            sell_candidates.append(
+                {
+                    "ts": _serialize_dt(row.get("ts")),
+                    "side": "sell",
+                    "kind": "stop_loss_exit",
+                    "label": "候选卖点",
+                    "price": _round_price(high * 1.003 if high > 0 else close),
+                    "reason": reason,
+                    "score": score,
+                    "_bar_index": idx,
+                }
+            )
+
+    if action in ("buy", "watch"):
+        final_buy = _select_markers(buy_candidates, limit=2)
+        final_sell = _select_markers(
+            [item for item in sell_candidates if item["kind"] == "stop_loss_exit"],
+            limit=1,
+        )
+    else:
+        final_buy = _select_markers(
+            [item for item in buy_candidates if item["kind"] == "breakout_confirm"],
+            limit=1,
+        )
+        final_sell = _select_markers(sell_candidates, limit=2)
+
+    return sorted(final_buy + final_sell, key=lambda value: str(value.get("ts", "")))
+
+
 def scan_once(timeframes: list[str] | None = None) -> list[dict]:
     fired_events: list[dict] = []
     scanned_at = datetime.now()
@@ -518,6 +794,80 @@ def get_live_decision(symbol: str, timeframe: str | None = None) -> dict | None:
     selected_timeframe = _normalize_timeframe(timeframe)
     ensure_fresh(selected_timeframe)
     return _snapshots.get(selected_timeframe, {}).get(symbol)
+
+
+def get_live_decision_chart(symbol: str, timeframe: str | None = None, limit: int = 240) -> dict | None:
+    selected_timeframe = _normalize_timeframe(timeframe)
+    chart_limit = max(60, min(int(limit or 240), 500))
+    snapshot = get_live_decision(symbol, timeframe=selected_timeframe)
+    if not snapshot:
+        return None
+
+    db = SessionLocal()
+    try:
+        market = MarketDataService(db)
+        chart_source = market.get_recent_bars(symbol=symbol, timeframe=selected_timeframe, limit=chart_limit)
+    finally:
+        db.close()
+
+    frame = _coerce_chart_frame(chart_source.get("items") or [])
+    if frame.empty or len(frame) < 30:
+        return {
+            "symbol": snapshot["symbol"],
+            "name": snapshot["name"],
+            "timeframe": snapshot["timeframe"],
+            "bars": [],
+            "markers": [],
+            "levels": {
+                "buy_zone": snapshot["buy_zone"],
+                "sell_zone": snapshot["sell_zone"],
+                "breakout_trigger": snapshot["breakout_trigger"],
+                "stop_loss": snapshot["stop_loss"],
+                "take_profit": snapshot["take_profit"],
+                "support": snapshot["support"],
+                "resistance": snapshot["resistance"],
+            },
+            "meta": {
+                "is_realtime": bool(chart_source.get("is_realtime")),
+                "source": chart_source.get("source"),
+                "bar_count": len(chart_source.get("items") or []),
+                "last_bar_ts": None,
+                "scanned_at": snapshot["scanned_at"],
+                "quote_ts": snapshot.get("quote_ts"),
+                "has_candidates": False,
+                "insufficient_bars": True,
+            },
+        }
+
+    enriched = IndicatorService.enrich(frame)
+    markers = _build_chart_markers(enriched, snapshot)
+    last_bar_ts = _serialize_dt(enriched.iloc[-1].get("ts")) if not enriched.empty else None
+    return {
+        "symbol": snapshot["symbol"],
+        "name": snapshot["name"],
+        "timeframe": snapshot["timeframe"],
+        "bars": _export_chart_bars(enriched),
+        "markers": markers,
+        "levels": {
+            "buy_zone": snapshot["buy_zone"],
+            "sell_zone": snapshot["sell_zone"],
+            "breakout_trigger": snapshot["breakout_trigger"],
+            "stop_loss": snapshot["stop_loss"],
+            "take_profit": snapshot["take_profit"],
+            "support": snapshot["support"],
+            "resistance": snapshot["resistance"],
+        },
+        "meta": {
+            "is_realtime": bool(chart_source.get("is_realtime")),
+            "source": chart_source.get("source"),
+            "bar_count": len(enriched),
+            "last_bar_ts": last_bar_ts,
+            "scanned_at": snapshot["scanned_at"],
+            "quote_ts": snapshot.get("quote_ts"),
+            "has_candidates": bool(markers),
+            "insufficient_bars": False,
+        },
+    }
 
 
 def get_latest_plans(limit: int = 20, timeframe: str | None = None) -> dict:

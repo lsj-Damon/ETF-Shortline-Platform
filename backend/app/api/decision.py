@@ -30,6 +30,14 @@ def get_live_decision(symbol: str, timeframe: str = "5m"):
     return item
 
 
+@router.get("/api/v1/decisions/live/{symbol}/chart")
+def get_live_decision_chart(symbol: str, timeframe: str = "5m", limit: int = 240):
+    item = decision_service.get_live_decision_chart(symbol, timeframe=timeframe, limit=limit)
+    if not item:
+        raise HTTPException(status_code=404, detail="decision chart not found for symbol")
+    return item
+
+
 @router.get("/api/v1/decisions/rank")
 def get_decision_rank(limit: int = 20, timeframe: str = "5m"):
     return decision_service.get_live_decisions(limit=limit, timeframe=timeframe)

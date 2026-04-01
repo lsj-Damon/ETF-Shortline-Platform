@@ -10,6 +10,11 @@ export const getDecisionDetail = async (symbol: string, timeframe = '5m') => {
   return res.data
 }
 
+export const getDecisionChart = async (symbol: string, timeframe = '5m', limit = 240) => {
+  const res = await http.get(`/api/v1/decisions/live/${symbol}/chart`, { params: { timeframe, limit } })
+  return res.data
+}
+
 export const getRecentDecisionEvents = async (limit = 30, timeframe = '5m') => {
   const res = await http.get('/api/v1/decisions/recent-events', { params: { limit, timeframe } })
   return res.data
