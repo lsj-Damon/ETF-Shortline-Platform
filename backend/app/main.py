@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.alerts import router as alerts_router
 from app.api.backtest import router as backtest_router
+from app.api.daily_recommendation import router as daily_recommendation_router
 from app.api.decision import router as decision_router
 from app.api.datasource import router as datasource_router
 from app.api.etf import router as etf_router
@@ -15,11 +16,13 @@ from app.api.strategy import router as strategy_router
 from app.core.config import get_settings
 from app.core.db import Base, engine, SessionLocal
 from app.services import decision_service
+from app.services import daily_recommendation_service
 from app.services import signal_monitor_service as monitor
 from app.services.seed_service import seed_default_strategies
 import app.models.etf  # noqa
 import app.models.strategy  # noqa
 import app.models.backtest  # noqa
+import app.models.daily_recommendation  # noqa
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -45,6 +48,17 @@ def _scheduled_decision_scan():
         logger.exception("[scheduler] decision scan failed")
 
 
+def _scheduled_daily_recommendation_save():
+    db = SessionLocal()
+    try:
+        result = daily_recommendation_service.save_daily_recommendations(db)
+        logger.info("[scheduler] saved %s daily recommendation snapshots", result.get("saved", 0))
+    except Exception:
+        logger.exception("[scheduler] daily recommendation save failed")
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     with SessionLocal() as db:
@@ -61,6 +75,15 @@ async def lifespan(_app: FastAPI):
         trigger="interval",
         minutes=decision_service.SCAN_INTERVAL_MIN,
         id="decision_scan",
+        replace_existing=True,
+    )
+    _scheduler.add_job(
+        _scheduled_daily_recommendation_save,
+        trigger="cron",
+        day_of_week="mon-fri",
+        hour=daily_recommendation_service.SAVE_HOUR,
+        minute=daily_recommendation_service.SAVE_MINUTE,
+        id="daily_recommendation_save",
         replace_existing=True,
     )
     _scheduler.start()
@@ -86,6 +109,7 @@ app.include_router(etf_router)
 app.include_router(strategy_router)
 app.include_router(backtest_router)
 app.include_router(decision_router)
+app.include_router(daily_recommendation_router)
 app.include_router(alerts_router)
 
 

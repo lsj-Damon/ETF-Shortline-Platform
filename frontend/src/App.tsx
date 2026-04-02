@@ -5,6 +5,7 @@ import EtfDataPage from './pages/EtfDataPage'
 import StrategyPage from './pages/StrategyPage'
 import BacktestPage from './pages/BacktestPage'
 import DecisionCenterPage from './pages/DecisionCenterPage'
+import DailyRecommendationPage from './pages/DailyRecommendationPage'
 import OptimizationPage from './pages/OptimizationPage'
 import SignalAnalysisPage from './pages/SignalAnalysisPage'
 
@@ -26,6 +27,7 @@ export default function App() {
           items={[
             { key: 'etf', label: 'ETF 数据中心' },
             { key: 'decision', label: '交易决策中心' },
+            { key: 'daily-recommendation', label: '每日建议记录' },
             { key: 'strategy', label: '策略配置' },
             { key: 'backtest', label: '回测中心' },
             { key: 'signal', label: '买卖点分析' },
@@ -41,6 +43,7 @@ export default function App() {
         <Content style={{ padding: 16 }}>
           {activeKey === 'etf' && <EtfDataPage />}
           {activeKey === 'decision' && <DecisionCenterPage />}
+          {activeKey === 'daily-recommendation' && <DailyRecommendationPage />}
           {activeKey === 'strategy' && <StrategyPage />}
           {activeKey === 'backtest' && <BacktestPage />}
           {activeKey === 'signal' && <SignalAnalysisPage />}
