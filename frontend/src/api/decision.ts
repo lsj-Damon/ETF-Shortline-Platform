@@ -1,4 +1,4 @@
-﻿import http from './http'
+import http from './http'
 
 export const getLiveDecisions = async (limit = 20, timeframe = '5m') => {
   const res = await http.get('/api/v1/decisions/live', { params: { limit, timeframe } })
@@ -7,6 +7,11 @@ export const getLiveDecisions = async (limit = 20, timeframe = '5m') => {
 
 export const getDecisionDetail = async (symbol: string, timeframe = '5m') => {
   const res = await http.get(`/api/v1/decisions/live/${symbol}`, { params: { timeframe } })
+  return res.data
+}
+
+export const getDecisionSymbols = async (timeframe = '5m') => {
+  const res = await http.get('/api/v1/decisions/symbols', { params: { timeframe } })
   return res.data
 }
 
@@ -29,3 +34,4 @@ export const scanDecisions = async (timeframe?: string) => {
   const res = await http.post('/api/v1/decisions/scan', null, { params: timeframe ? { timeframe } : {} })
   return res.data
 }
+

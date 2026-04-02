@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 from typing import AsyncGenerator
 
 from fastapi import APIRouter, HTTPException
@@ -20,6 +20,11 @@ async def _event_generator(timeframe: str | None) -> AsyncGenerator[str, None]:
 @router.get("/api/v1/decisions/live")
 def list_live_decisions(limit: int = 20, timeframe: str = "5m"):
     return decision_service.get_live_decisions(limit=limit, timeframe=timeframe)
+
+
+@router.get("/api/v1/decisions/symbols")
+def list_decision_symbols(timeframe: str = "5m"):
+    return decision_service.get_selectable_symbols(timeframe=timeframe)
 
 
 @router.get("/api/v1/decisions/live/{symbol}")
@@ -83,3 +88,4 @@ async def decision_stream(timeframe: str | None = None):
             "X-Accel-Buffering": "no",
         },
     )
+

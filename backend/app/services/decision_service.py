@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import copy
@@ -352,7 +352,7 @@ def _run_scan_locked(timeframe: str, max_age_seconds: int, allow_stale: bool) ->
 
 def _pick_scan_targets(db: Session, timeframes: list[str] | None = None) -> dict[str, list[dict]]:
     active_timeframes = timeframes or list(_SUPPORTED_TIMEFRAMES)
-    metas = db.query(EtfBarMeta).filter(EtfBarMeta.timeframe.in_(active_timeframes)).all()
+    metas = db.query(EtfBarMeta).filter(EtfBarMeta.timeframe.in_(active_timeframes), EtfBarMeta.bar_count >= 30).all()
     if not metas:
         return {timeframe: [] for timeframe in active_timeframes}
 
@@ -1032,6 +1032,20 @@ def get_live_decisions(limit: int = 20, timeframe: str | None = None) -> dict:
     }
 
 
+def get_selectable_symbols(timeframe: str | None = None) -> dict:
+    selected_timeframe = _normalize_timeframe(timeframe)
+    db = SessionLocal()
+    try:
+        items = _pick_scan_targets(db, [selected_timeframe]).get(selected_timeframe, [])
+    finally:
+        db.close()
+    return {
+        "items": items,
+        "timeframe": selected_timeframe,
+        "count": len(items),
+    }
+
+
 def get_live_decision(symbol: str, timeframe: str | None = None) -> dict | None:
     selected_timeframe = _normalize_timeframe(timeframe)
     ensure_fresh(selected_timeframe)
@@ -1199,3 +1213,4 @@ async def subscribe(timeframe: str | None = None) -> AsyncIterator[dict]:
 
 def dumps_payload(payload: dict) -> str:
     return json.dumps(payload, ensure_ascii=False)
+

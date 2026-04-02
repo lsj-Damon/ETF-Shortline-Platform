@@ -187,7 +187,7 @@ export default function KlineChart({
           price: safeNum(marker.price) ?? fallbackPrice ?? 0,
         }
       })
-      .filter((item) => item.value[1] > 0)
+      .filter((item) => item.price > 0)
     const sellMarkers = rawMarkers
       .filter((marker) => marker.side === 'sell')
       .map((marker) => {
@@ -204,7 +204,7 @@ export default function KlineChart({
           price: safeNum(marker.price) ?? fallbackPrice ?? 0,
         }
       })
-      .filter((item) => item.value[1] > 0)
+      .filter((item) => item.price > 0)
 
     const markLines: any[] = []
     const levels = chart?.levels
@@ -364,13 +364,13 @@ export default function KlineChart({
           ],
       xAxis: showPerformance
         ? [
-            { type: 'category', data: labels, gridIndex: 0, axisLabel: { show: false }, scale: true },
-            { type: 'category', data: labels, gridIndex: 1, axisLabel: { show: false }, scale: true },
-            { type: 'category', data: equityLabels, gridIndex: 2, scale: true, axisLabel: { fontSize: 10 } },
+            { type: 'category', data: labels, gridIndex: 0, axisLabel: { show: false } },
+            { type: 'category', data: labels, gridIndex: 1, axisLabel: { show: false } },
+            { type: 'category', data: equityLabels, gridIndex: 2, axisLabel: { fontSize: 10 } },
           ]
         : [
-            { type: 'category', data: labels, gridIndex: 0, axisLabel: { show: false }, scale: true },
-            { type: 'category', data: labels, gridIndex: 1, scale: true, axisLabel: { fontSize: 10 } },
+            { type: 'category', data: labels, gridIndex: 0, axisLabel: { show: false } },
+            { type: 'category', data: labels, gridIndex: 1, axisLabel: { fontSize: 10 } },
           ],
       yAxis: showPerformance
         ? [

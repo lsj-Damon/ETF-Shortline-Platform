@@ -1,7 +1,7 @@
-import { Button, Card, Col, Empty, Progress, Row, Segmented, Space, Tag, Typography, message } from 'antd'
+import { Button, Card, Col, Empty, Progress, Row, Segmented, Select, Space, Tag, Typography, message } from 'antd'
 import { ReloadOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { getDecisionChart, getDecisionDetail, getLatestPlans, getLiveDecisions, getRecentDecisionEvents, scanDecisions } from '../api/decision'
+import { getDecisionChart, getDecisionDetail, getDecisionSymbols, getLatestPlans, getLiveDecisions, getRecentDecisionEvents, scanDecisions } from '../api/decision'
 import KlineChart from '../components/KlineChart'
 import './DecisionCenterPage.css'
 
@@ -11,6 +11,7 @@ type BoardPayload = {
   items: any[]
   events: any[]
   plans: any[]
+  symbols: any[]
   lastScanAt: string | null
 }
 
@@ -70,6 +71,7 @@ function panelCacheKey(symbol: string, timeframe: string) {
 export default function DecisionCenterPage() {
   const [items, setItems] = useState<any[]>([])
   const [plans, setPlans] = useState<any[]>([])
+  const [symbolOptions, setSymbolOptions] = useState<any[]>([])
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null)
   const [detail, setDetail] = useState<any | null>(null)
   const [decisionChart, setDecisionChart] = useState<any | null>(null)
@@ -105,6 +107,14 @@ export default function DecisionCenterPage() {
   const buyCount = useMemo(() => items.filter((item) => item.action === 'buy').length, [items])
   const planCount = useMemo(() => plans.length, [plans])
   const highConvictionCount = useMemo(() => items.filter((item) => item.confidence >= 75).length, [items])
+  const symbolSelectOptions = useMemo(
+    () => symbolOptions.map((item) => ({ value: item.symbol, label: `${item.symbol} ${item.name}` })),
+    [symbolOptions],
+  )
+  const selectedSymbolInOptions = useMemo(
+    () => Boolean(selectedSymbol && symbolOptions.some((item) => item.symbol === selectedSymbol)),
+    [selectedSymbol, symbolOptions],
+  )
 
   useEffect(() => {
     selectedSymbolRef.current = selectedSymbol
@@ -121,14 +131,22 @@ export default function DecisionCenterPage() {
 
   const applyBoardPayload = (payload: BoardPayload, preferredSymbol?: string | null) => {
     const nextItems = payload.items || []
+    const nextSymbols = payload.symbols || []
     setItems(nextItems)
     setEvents(payload.events || [])
     setPlans(payload.plans || [])
+    setSymbolOptions(nextSymbols)
     setLastScanAt(payload.lastScanAt || null)
 
-    const preferred = preferredSymbol && nextItems.some((item: any) => item.symbol === preferredSymbol) ? preferredSymbol : null
-    const current = selectedSymbolRef.current && nextItems.some((item: any) => item.symbol === selectedSymbolRef.current) ? selectedSymbolRef.current : null
-    const nextSymbol = preferred || current || nextItems[0]?.symbol || null
+    const preferred = preferredSymbol && (
+      nextItems.some((item: any) => item.symbol === preferredSymbol)
+      || nextSymbols.some((item: any) => item.symbol === preferredSymbol)
+    ) ? preferredSymbol : null
+    const current = selectedSymbolRef.current && (
+      nextItems.some((item: any) => item.symbol === selectedSymbolRef.current)
+      || nextSymbols.some((item: any) => item.symbol === selectedSymbolRef.current)
+    ) ? selectedSymbolRef.current : null
+    const nextSymbol = preferred || current || nextItems[0]?.symbol || nextSymbols[0]?.symbol || null
 
     if (nextSymbol) {
       if (selectedSymbolRef.current !== nextSymbol) {
@@ -152,7 +170,8 @@ export default function DecisionCenterPage() {
       getLiveDecisions(24, timeframe),
       getRecentDecisionEvents(20, timeframe),
       getLatestPlans(8, timeframe),
-    ]).then(([liveRes, eventRes, planRes]) => {
+      getDecisionSymbols(timeframe),
+    ]).then(([liveRes, eventRes, planRes, symbolRes]) => {
       if (liveRes.status !== 'fulfilled') {
         throw liveRes.reason
       }
@@ -161,6 +180,7 @@ export default function DecisionCenterPage() {
         items: liveRes.value.items || [],
         events: eventRes.status === 'fulfilled' ? eventRes.value.items || [] : [],
         plans: planRes.status === 'fulfilled' ? planRes.value.items || [] : [],
+        symbols: symbolRes.status === 'fulfilled' ? symbolRes.value.items || [] : [],
         lastScanAt:
           liveRes.value.last_scan_at
           || (eventRes.status === 'fulfilled' ? eventRes.value.last_scan_at : null)
@@ -380,6 +400,16 @@ export default function DecisionCenterPage() {
           <div className="decision-toolbar">
             <div className="decision-toolbar-left">
               <Segmented options={timeframeOptions} value={currentTimeframe} onChange={(value) => setCurrentTimeframe(String(value))} />
+              <Select
+                showSearch
+                style={{ minWidth: 220 }}
+                placeholder="选择 ETF"
+                options={symbolSelectOptions}
+                value={selectedSymbolInOptions ? selectedSymbol || undefined : undefined}
+                onChange={(value) => updateSelectedSymbol(String(value))}
+                optionFilterProp="label"
+                notFoundContent="当前周期暂无可选 ETF"
+              />
               <Typography.Text type="secondary">最后扫描：{formatTime(lastScanAt)}</Typography.Text>
             </div>
             <div className="decision-toolbar-right">
@@ -396,7 +426,7 @@ export default function DecisionCenterPage() {
             <Card className="decision-panel" title={`机会排序 · ${currentTimeframe}`} loading={loading}>
               {items.length === 0 ? (
                 <div className="decision-empty">
-                  <Empty description="当前周期暂无可用决策，请先导入对应 ETF 历史数据" />
+                  <Empty description={symbolOptions.length > 0 ? '当前周期暂无排序结果，可用上方 ETF 选择器切换查看' : '当前周期暂无可用决策，请先导入对应 ETF 历史数据'} />
                 </div>
               ) : (
                 <div className="decision-rank-list">
