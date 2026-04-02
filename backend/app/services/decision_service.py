@@ -971,10 +971,12 @@ def scan_once(timeframes: list[str] | None = None) -> list[dict]:
                     bars = market.get_bars(symbol=symbol, timeframe=timeframe, limit=200)
                     if len(bars) < 30:
                         continue
-                    try:
-                        quote = market.get_quote(symbol)
-                    except Exception:
-                        quote = None
+                    quote = None
+                    if timeframe != "daily":
+                        try:
+                            quote = market.get_quote(symbol)
+                        except Exception:
+                            quote = None
 
                     snapshot = _compute_snapshot(
                         symbol=symbol,
